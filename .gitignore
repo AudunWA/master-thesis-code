@@ -206,3 +206,4 @@ model_checkpoints
 training_data
 predict_test_data
 prepare_segmentation_data/data
+output
