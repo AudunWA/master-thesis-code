@@ -2,6 +2,8 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/src/keras-segmentation" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/src/keras-segmnentation" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/training" vcs="Git" />
   </component>
 </project>
