@@ -23,7 +23,7 @@ class BasicAgent(Agent):
     target destination. This agent respects traffic lights and other vehicles.
     """
 
-    def __init__(self, vehicle, target_speed=20):
+    def __init__(self, vehicle, target_speed=20, dt=1.0/20.0):
         """
 
         :param vehicle: actor to apply to local planner logic onto
@@ -36,7 +36,7 @@ class BasicAgent(Agent):
             'K_P': 0.5,
             'K_D': 0.02,
             'K_I': 0,
-            'dt': 1.0/20.0}
+            'dt': dt}
         self._local_planner = LocalPlanner(
             self._vehicle, opt_dict={'target_speed' : target_speed,
             'lateral_control_dict':args_lateral_dict})

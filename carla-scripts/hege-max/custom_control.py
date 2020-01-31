@@ -67,6 +67,9 @@ import os
 import sys
 
 # This is an alternative to running easy_install <carla egg file>
+from typing import Optional, List
+
+from agents.navigation.agent import Agent
 from agents.navigation.basic_agent import BasicAgent
 
 try:
@@ -76,6 +79,8 @@ try:
         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
 except IndexError:
     pass
+
+FIXED_DELTA_SECONDS = 0.05
 
 # ==============================================================================
 # -- imports -------------------------------------------------------------------
@@ -178,6 +183,63 @@ except ImportError:
     raise RuntimeError(
         'cannot import numpy, make sure numpy package is installed')
 
+try:
+    import queue
+except ImportError:
+    import Queue as queue
+
+
+class CarlaSyncMode(object):
+    """
+    Context manager to synchronize output from different sensors. Synchronous
+    mode is enabled as long as we are inside this context
+
+        with CarlaSyncMode(world, sensors) as sync_mode:
+            while True:
+                data = sync_mode.tick(timeout=1.0)
+
+    """
+
+    def __init__(self, world, *sensors, **kwargs):
+        self.world = world
+        self.sensors = sensors
+        self.frame = None
+        self.delta_seconds = 1.0 / kwargs.get('fps', 20)
+        self._queues = []
+        self._settings = None
+
+    def __enter__(self):
+        self._settings = self.world.get_settings()
+        self.frame = self.world.apply_settings(carla.WorldSettings(
+            no_rendering_mode=False,
+            synchronous_mode=True,
+            fixed_delta_seconds=self.delta_seconds))
+
+        def make_queue(register_event):
+            q = queue.Queue()
+            register_event(q.put)
+            self._queues.append(q)
+
+        make_queue(self.world.on_tick)
+        for sensor in self.sensors:
+            make_queue(sensor.listen)
+        return self
+
+    def tick(self, timeout):
+        self.frame = self.world.tick()
+        data = [self._retrieve_data(q, timeout) for q in self._queues]
+        assert all(x.frame == self.frame for x in data)
+        return data
+
+    def __exit__(self, *args, **kwargs):
+        self.world.apply_settings(self._settings)
+
+    def _retrieve_data(self, sensor_queue, timeout):
+        while True:
+            data = sensor_queue.get(timeout=timeout)
+            if data.frame == self.frame:
+                return data
+
 
 # ==============================================================================
 # -- Global functions ----------------------------------------------------------
@@ -204,23 +266,23 @@ def get_actor_display_name(actor, truncate=250):
 
 
 class World(object):
-    def __init__(self, client, carla_world, hud, environment, history, actor_filter, settings, hq_recording=False):
+    def __init__(self, client: carla.Client, carla_world: carla.World, hud: 'HUD', environment: Environment, history: 'History', actor_filter, settings, hq_recording=False):
         self.client = client
         self.world = carla_world
         self.map = self.world.get_map()
-        self.player = None
+        self.player = None  # type: Optional[carla.Vehicle]
         self._actor_filter = actor_filter
 
         # Other classes 
         self.hud = hud
         self.history = history
-        self.camera_manager = None
+        self.camera_manager = None  # type: Optional[CameraManager]
 
         # Weather 
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
         self._change_weather = None
-        self._weather_type = None
+        self._weather_type = None  # type: WeatherType
 
         self.evaluator = Evaluator(self.hud, self)
 
@@ -344,7 +406,7 @@ class World(object):
             self.destroy()
             self.player = None
 
-        # Choose starting spawnpoit in eval routes 
+        # Choose starting spawnpoint in eval routes
         if self._eval_mode is not None and self._eval_mode != False:
             self._eval_route_canceled = False
             spawn_point = self.map.get_spawn_points()[self._eval_routes[self._eval_routes_idx][0][0]]
@@ -382,15 +444,19 @@ class World(object):
                 self._spawn_point_destination]  # TODO: what should be destination?
             self._new_spawn_point = None
 
-            # Spawn player
+        # Spawn player
         while self.player is None:
             self.player = self.world.try_spawn_actor(blueprint, spawn_point)
 
+        # Progress simulation one step to set player position
+        self.world.tick()
+
         # Create Autopilot 
-        self._client_ap = BasicAgent(self.player)
-        # self._client_ap.set_destination((destination_point.location.x,
-        #                        destination_point.location.y,
-        #                        destination_point.location.z))
+        self._client_ap = BasicAgent(self.player, dt=FIXED_DELTA_SECONDS)
+        self._client_ap._local_planner._dt = FIXED_DELTA_SECONDS
+        #self._client_ap.set_destination((destination_point.location.x,
+        #                         destination_point.location.y,
+        #                         destination_point.location.z))
 
         # Set up the sensors.
         self.camera_manager = CameraManager(self.player, self._client_ap, self.hud,
@@ -429,7 +495,7 @@ class World(object):
         self.world.set_weather(preset[0])
         self.history.update_weather_index(self._weather_index)
 
-    def next_weather(self, reverse=False, weather_type=None):
+    def next_weather(self, reverse=False, weather_type: WeatherType = None):
         """ Change weather to next weather """
         self._weather_index += -1 if reverse else 1
         self._weather_index %= len(self._weather_presets)
@@ -604,7 +670,7 @@ class KeyboardControl(object):
         if len(self._steer_history) > self._history_size:
             self._steer_history.pop()
 
-    def parse_events(self, client, world, clock):
+    def parse_events(self, client, world: World, clock: pygame.time.Clock):
         if not self._red_lights_allowed and world._eval_cars[world._eval_cars_idx] == 0:
             set_green_traffic_light(world.player)
         for event in pygame.event.get():
@@ -937,7 +1003,7 @@ class KeyboardControl(object):
         self._control.brake = brakeCmd
         self._control.throttle = throttleCmd
 
-    def _parse_drive_model_commands(self, world):
+    def _parse_drive_model_commands(self, world: World):
         images = {}
         info = {}
 
@@ -992,7 +1058,7 @@ class KeyboardControl(object):
 
         self._control.brake = 1 if float(brake) > 0.3 else 0
 
-    def _parse_vehicle_keys(self, world, keys, milliseconds):
+    def _parse_vehicle_keys(self, world: World, keys: List[int], milliseconds: int):
         self._control.throttle = 1.0 if keys[K_UP] or keys[K_w] else 0.0
         steer_increment = 5e-4 * milliseconds
         if keys[K_LEFT] or keys[K_a]:
@@ -1007,9 +1073,9 @@ class KeyboardControl(object):
         self._control.brake = 1.0 if keys[K_DOWN] or keys[K_s] else 0.0
         self._control.hand_brake = keys[K_SPACE]
 
-    def _parse_client_ap(self, world):
+    def _parse_client_ap(self, world: World):
         noise = np.random.uniform(-self._noise_amount, self._noise_amount)
-        client_autopilot_control = world._client_ap.run_step()
+        client_autopilot_control = world._client_ap.run_step(debug=False)
         world.history.update_client_autopilot_control(client_autopilot_control)
         self._control.brake = client_autopilot_control.brake
         self._control.throttle = client_autopilot_control.throttle
@@ -1134,7 +1200,7 @@ class HUD(object):
 
             if world._eval_cars_idx is not None and world._eval_cars is not None:
                 self._info_text += ['Spawned vehicles: %d (%d/%d)' % (
-                world._eval_cars[world._eval_cars_idx], world._eval_cars_idx + 1, len(world._eval_cars))]
+                    world._eval_cars[world._eval_cars_idx], world._eval_cars_idx + 1, len(world._eval_cars))]
 
             if world._eval_weathers_idx is not None and world._eval_weathers is not None:
                 self._info_text += ['Eval weather: %d/%d' % (world._eval_weathers_idx + 1, len(world._eval_weathers))]
@@ -1278,7 +1344,7 @@ class HelpText(object):
 
 
 class CameraManager(object):
-    def __init__(self, parent_actor, client_ap, hud, history, eval=False, hq_recording=False):
+    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', eval=False, hq_recording=False):
         self.sensor = None
         self._surface = None
         self._parent = parent_actor
@@ -1475,7 +1541,7 @@ class CameraManager(object):
 
 
 class History:
-    def __init__(self, output_folder, environment):
+    def __init__(self, output_folder: str, environment: Environment):
         self._latest_images = {}
         self._image_history = []
         self._measurements_history = []
@@ -1485,7 +1551,7 @@ class History:
         self._driving_log = None
         self._active = False
         self._latest_client_autopilot_control = None
-        self.control_type = None
+        self.control_type = None  # type: ControlType
         self._latest_hlc = None
         self._environment = environment
         self._left_lane_change_valid = None
@@ -1963,10 +2029,16 @@ def game_loop(args, settings):
     try:
 
         client = carla.Client(args.host, args.port)
-        client.load_world("Town01")
-        sim_world = client.get_world()
+        client.load_world("Town04")
+        sim_world = client.get_world()  # type: carla.World
         map_name = sim_world.get_map().name
         client.set_timeout(15.0)
+
+        # Enable synchronous mode
+        sim_settings = sim_world.get_settings()
+        sim_settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
+        sim_settings.synchronous_mode = True
+        sim_world.apply_settings(sim_settings)
 
         # Get environment 
         if map_name == "Town01" or map_name == "Town02":
@@ -2005,7 +2077,7 @@ def game_loop(args, settings):
         clock = pygame.time.Clock()
 
         while True:
-            # sim_world.tick()
+            sim_world.tick()
             clock.tick(int(hud.server_fps_realtime))
             if controller.parse_events(client, world, clock):
                 return

@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from typing import Optional
+
 import cv2
 import numpy as np
 import os 
@@ -23,7 +25,7 @@ def encoder(x, angle):
 
 class LSTMKeras(ModelInterface):
     def __init__(self, path, seq_length, sampling_interval, capture_rate=3):
-        self._model = None
+        self._model = None  # type: Optional[tensorflow.keras.models.Model]
         
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
