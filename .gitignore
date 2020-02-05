@@ -211,6 +211,7 @@ prepare_segmentation_data/data
 training/dataset
 training/psp_checkpoints_best
 segmentation-prediction/dataset
+output
 
 
 

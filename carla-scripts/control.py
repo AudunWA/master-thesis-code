@@ -44,7 +44,6 @@ Use ARROWS or WASD keys for control.
 
 from __future__ import print_function
 
-
 # ==============================================================================
 # -- find carla module ---------------------------------------------------------
 # ==============================================================================
@@ -53,6 +52,9 @@ from __future__ import print_function
 import glob
 import os
 import sys
+from typing import Optional
+
+from agents.navigation.basic_agent import BasicAgent
 
 try:
     sys.path.append(glob.glob('./carla/dist/carla-*%d.%d-%s.egg' % (
@@ -61,7 +63,6 @@ try:
         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
 except IndexError:
     pass
-
 
 # ==============================================================================
 # -- imports -------------------------------------------------------------------
@@ -80,6 +81,14 @@ import math
 import random
 import re
 import weakref
+
+import time
+import pandas as pd
+from pathlib import Path
+import cv2
+from enum import Enum
+
+from agents.navigation.local_planner import RoadOption
 
 try:
     import pygame
@@ -145,7 +154,7 @@ def get_actor_display_name(actor, truncate=250):
 
 
 class World(object):
-    def __init__(self, carla_world, hud, args):
+    def __init__(self, carla_world: carla.World, hud: 'HUD', args, history: 'History'):
         self.world = carla_world
         self.actor_role_name = args.rolename
         try:
@@ -155,14 +164,18 @@ class World(object):
             print('  The server could not send the OpenDRIVE (.xodr) file:')
             print('  Make sure it exists, has the same name of your town, and is correct.')
             sys.exit(1)
+
+        # custom
+        self.history = history
         self.hud = hud
-        self.player = None
-        self.collision_sensor = None
-        self.lane_invasion_sensor = None
-        self.gnss_sensor = None
-        self.imu_sensor = None
-        self.radar_sensor = None
-        self.camera_manager = None
+        self.player = None  # type: Optional[carla.Vehicle]
+        self._client_ap = None  # type: Optional[BasicAgent]
+        self.collision_sensor = None  # type: Optional[carla.Vehicle]
+        self.lane_invasion_sensor = None  # type: Optional[CollisionSensor]
+        self.gnss_sensor = None  # type: Optional[GnssSensor]
+        self.imu_sensor = None  # type: Optional[IMUSensor]
+        self.radar_sensor = None  # type: Optional[RadarSensor]
+        self.camera_manager = None  # type: Optional[CameraManager]
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
         self._actor_filter = args.filter
@@ -173,6 +186,8 @@ class World(object):
         self.recording_start = 0
 
     def restart(self):
+        self.history._initiate()
+
         self.player_max_speed = 1.589
         self.player_max_speed_fast = 3.713
         # Keep same camera config if the camera manager exists.
@@ -211,14 +226,19 @@ class World(object):
             spawn_points = self.map.get_spawn_points()
             spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
             self.player = self.world.try_spawn_actor(blueprint, spawn_point)
+
+        # Create autopilot
+        self._client_ap = BasicAgent(self.player)
+
         # Set up the sensors.
         self.collision_sensor = CollisionSensor(self.player, self.hud)
         self.lane_invasion_sensor = LaneInvasionSensor(self.player, self.hud)
         self.gnss_sensor = GnssSensor(self.player)
         self.imu_sensor = IMUSensor(self.player)
-        self.camera_manager = CameraManager(self.player, self.hud, self._gamma)
+        self.camera_manager = CameraManager(self.player, self.hud, self._gamma, self.history, self._client_ap)
         self.camera_manager.transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
+        self.camera_manager.initiate_recording()
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
 
@@ -228,6 +248,7 @@ class World(object):
         preset = self._weather_presets[self._weather_index]
         self.hud.notification('Weather: %s' % preset[1])
         self.player.get_world().set_weather(preset[0])
+        self.history.update_weather_index(self._weather_index)
 
     def toggle_radar(self):
         if self.radar_sensor is None:
@@ -238,6 +259,7 @@ class World(object):
 
     def tick(self, clock):
         self.hud.tick(self, clock)
+        self.camera_manager.tick()
 
     def render(self, display):
         self.camera_manager.render(display)
@@ -269,7 +291,13 @@ class World(object):
 
 
 class KeyboardControl(object):
-    def __init__(self, world, start_in_autopilot):
+    def __init__(self, world: 'World', start_in_autopilot: bool):
+        # Settings
+        self._control_type = ControlType.MANUAL
+        self._client_ap_active = False
+        self._noise_enabled = False
+        self._noise_amount = 0.0
+
         self._autopilot_enabled = start_in_autopilot
         if isinstance(world.player, carla.Vehicle):
             self._control = carla.VehicleControl()
@@ -283,7 +311,7 @@ class KeyboardControl(object):
         self._steer_cache = 0.0
         world.hud.notification("Press 'H' or '?' for help.", seconds=4.0)
 
-    def parse_events(self, client, world, clock):
+    def parse_events(self, client: carla.Client, world: World, clock: pygame.time.Clock) -> bool:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return True
@@ -328,6 +356,7 @@ class KeyboardControl(object):
                     world.destroy_sensors()
                     # disable autopilot
                     self._autopilot_enabled = False
+                    self._client_ap_active = False
                     world.player.set_autopilot(self._autopilot_enabled)
                     world.hud.notification("Replaying file 'manual_recording.rec'")
                     # replayer
@@ -357,16 +386,60 @@ class KeyboardControl(object):
                         self._control.gear = max(-1, self._control.gear - 1)
                     elif self._control.manual_gear_shift and event.key == K_PERIOD:
                         self._control.gear = self._control.gear + 1
+                    # Autopilot
                     elif event.key == K_p and not (pygame.key.get_mods() & KMOD_CTRL):
-                        self._autopilot_enabled = not self._autopilot_enabled
-                        world.player.set_autopilot(self._autopilot_enabled)
-                        world.hud.notification('Autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
-        if not self._autopilot_enabled:
+                        if pygame.key.get_mods() & KMOD_SHIFT:
+                            self._autopilot_enabled = not self._autopilot_enabled
+                            world.player.set_autopilot(self._autopilot_enabled)
+                            world.hud.notification('Server autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
+                        else:
+                            self._client_ap_active = True
+                            self._control_type = ControlType.CLIENT_AP
+                            world.hud.notification('Control Mode: Client Autopilot')
+                            world.player.set_autopilot(False)
+
+        world.history.control_type = self._control_type
+
+        if not self._autopilot_enabled and not self._client_ap_active:
             if isinstance(self._control, carla.VehicleControl):
                 self._parse_vehicle_keys(pygame.key.get_pressed(), clock.get_time())
                 self._control.reverse = self._control.gear < 0
             elif isinstance(self._control, carla.WalkerControl):
                 self._parse_walker_keys(pygame.key.get_pressed(), clock.get_time(), world)
+            world.player.apply_control(self._control)
+
+        # Client Autopilot Driving
+        elif self._control_type == ControlType.CLIENT_AP:
+            # Update HLC to current RoadOption
+            world.history.update_hlc(world._client_ap._local_planner._target_road_option)
+
+            # Update lane check
+            is_left = True  # is_valid_lane_change(RoadOption.CHANGELANELEFT, world)
+            world.history.update_left_lane_change_valid(is_left)
+
+            is_right = True  # is_valid_lane_change(RoadOption.CHANGELANERIGHT, world)
+            world.history.update_right_lane_change_valid(is_right)
+
+            # Set target speed to current speed limit - 10 km/h
+            # world._client_ap._local_planner.set_speed(world.player.get_speed_limit() - 10)
+
+            self._parse_client_ap(world)
+
+            # Calculate distance to destination
+            # TODO: Replace 7 with world._spawn_point_destination
+            destination_waypoint = world.map.get_spawn_points()[7]
+            loc = world.player.get_transform().location
+            dx = destination_waypoint.location.x - loc.x
+            dy = destination_waypoint.location.y - loc.y
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            # Change route if client AP has reached its destination
+            if distance < 20:
+                world.hud.notification("Route Complete")
+                world.restart()
+                # Exit program if all routes are finished
+                #if world._quit_next:
+                #    return True
             world.player.apply_control(self._control)
 
     def _parse_vehicle_keys(self, keys, milliseconds):
@@ -405,6 +478,19 @@ class KeyboardControl(object):
         self._rotation.yaw = round(self._rotation.yaw, 1)
         self._control.direction = self._rotation.get_forward_vector()
 
+    def _parse_client_ap(self, world: World):
+        noise = np.random.uniform(-self._noise_amount, self._noise_amount)
+        client_autopilot_control = world._client_ap.run_step()
+        world.history.update_client_autopilot_control(client_autopilot_control)
+        self._control.brake = client_autopilot_control.brake
+        self._control.throttle = client_autopilot_control.throttle
+        if self._noise_enabled:
+            noise = np.random.uniform(-self._noise_amount, self._noise_amount)
+            self._control.steer = client_autopilot_control.steer + noise
+
+        else:
+            self._control.steer = client_autopilot_control.steer
+
     @staticmethod
     def _is_quit_shortcut(key):
         return (key == K_ESCAPE) or (key == K_q and pygame.key.get_mods() & KMOD_CTRL)
@@ -417,6 +503,9 @@ class KeyboardControl(object):
 
 class HUD(object):
     def __init__(self, width, height):
+        # custom
+        self._episode_start_time = 0
+
         self.dim = (width, height)
         font = pygame.font.Font(pygame.font.get_default_font(), 20)
         font_name = 'courier' if os.name == 'nt' else 'mono'
@@ -439,6 +528,8 @@ class HUD(object):
         self.server_fps = self._server_clock.get_fps()
         self.frame = timestamp.frame
         self.simulation_time = timestamp.elapsed_seconds
+        if self._episode_start_time == 0:
+            self._episode_start_time = self.simulation_time
 
     def tick(self, world, clock):
         self._notifications.tick(world, clock)
@@ -465,7 +556,7 @@ class HUD(object):
             'Map:     % 20s' % world.map.name,
             'Simulation time: % 12s' % datetime.timedelta(seconds=int(self.simulation_time)),
             '',
-            'Speed:   % 15.0f km/h' % (3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)),
+            'Speed:   % 15.0f km/h' % (3.6 * math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2)),
             u'Compass:% 17.0f\N{DEGREE SIGN} % 2s' % (compass, heading),
             'Accelero: (%5.1f,%5.1f,%5.1f)' % (world.imu_sensor.accelerometer),
             'Gyroscop: (%5.1f,%5.1f,%5.1f)' % (world.imu_sensor.gyroscope),
@@ -494,7 +585,8 @@ class HUD(object):
             'Number of vehicles: % 8d' % len(vehicles)]
         if len(vehicles) > 1:
             self._info_text += ['Nearby vehicles:']
-            distance = lambda l: math.sqrt((l.x - t.location.x)**2 + (l.y - t.location.y)**2 + (l.z - t.location.z)**2)
+            distance = lambda l: math.sqrt(
+                (l.x - t.location.x) ** 2 + (l.y - t.location.y) ** 2 + (l.z - t.location.z) ** 2)
             vehicles = [(distance(x.get_location()), x) for x in vehicles if x.id != world.player.id]
             for d, vehicle in sorted(vehicles):
                 if d > 200.0:
@@ -640,7 +732,7 @@ class CollisionSensor(object):
         actor_type = get_actor_display_name(event.other_actor)
         self.hud.notification('Collision with %r' % actor_type)
         impulse = event.normal_impulse
-        intensity = math.sqrt(impulse.x**2 + impulse.y**2 + impulse.z**2)
+        intensity = math.sqrt(impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2)
         self.history.append((event.frame, intensity))
         if len(self.history) > 4000:
             self.history.pop(0)
@@ -750,7 +842,7 @@ class RadarSensor(object):
     def __init__(self, parent_actor):
         self.sensor = None
         self._parent = parent_actor
-        self.velocity_range = 7.5 # m/s
+        self.velocity_range = 7.5  # m/s
         world = self._parent.get_world()
         self.debug = world.debug
         bp = world.get_blueprint_library().find('sensor.other.radar')
@@ -793,7 +885,7 @@ class RadarSensor(object):
             def clamp(min_v, max_v, value):
                 return max(min_v, min(value, max_v))
 
-            norm_velocity = detect.velocity / self.velocity_range # range [-1, 1]
+            norm_velocity = detect.velocity / self.velocity_range  # range [-1, 1]
             r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
             g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
             b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
@@ -804,13 +896,21 @@ class RadarSensor(object):
                 persistent_lines=False,
                 color=carla.Color(r, g, b))
 
+
 # ==============================================================================
 # -- CameraManager -------------------------------------------------------------
 # ==============================================================================
 
 
 class CameraManager(object):
-    def __init__(self, parent_actor, hud, gamma_correction):
+    def __init__(self, parent_actor, hud: HUD, gamma_correction, history, client_ap: BasicAgent):
+        # custom
+        self._history = history
+        self._frame_number = 1
+        self._hq_recording = False
+        self._capture_rate = 1 if self._hq_recording else 3
+        self._client_ap = client_ap
+
         self.sensor = None
         self.surface = None
         self._parent = parent_actor
@@ -832,13 +932,16 @@ class CameraManager(object):
             ['sensor.camera.depth', cc.LogarithmicDepth, 'Camera Depth (Logarithmic Gray Scale)', {}],
             ['sensor.camera.semantic_segmentation', cc.Raw, 'Camera Semantic Segmentation (Raw)', {}],
             ['sensor.camera.semantic_segmentation', cc.CityScapesPalette,
-                'Camera Semantic Segmentation (CityScapes Palette)', {}],
+             'Camera Semantic Segmentation (CityScapes Palette)', {}],
             ['sensor.lidar.ray_cast', None, 'Lidar (Ray-Cast)', {}],
             ['sensor.camera.rgb', cc.Raw, 'Camera RGB Distorted',
-                {'lens_circle_multiplier': '3.0',
-                'lens_circle_falloff': '3.0',
-                'chromatic_aberration_intensity': '0.5',
-                'chromatic_aberration_offset': '0'}]]
+             {'lens_circle_multiplier': '3.0',
+              'lens_circle_falloff': '3.0',
+              'chromatic_aberration_intensity': '0.5',
+              'chromatic_aberration_offset': '0'}]]
+
+        self._recording_sensors = []
+
         world = self._parent.get_world()
         bp_library = world.get_blueprint_library()
         for item in self.sensors:
@@ -854,6 +957,74 @@ class CameraManager(object):
                 bp.set_attribute('range', '50')
             item.append(bp)
         self.index = None
+
+    def initiate_recording(self):
+
+        sensor_bp = self._parent.get_world().get_blueprint_library().find(
+            'sensor.camera.rgb')
+        sensor_bp.set_attribute('image_size_x', "350")
+        sensor_bp.set_attribute('image_size_y', "160")
+
+        sensor = self._parent.get_world().spawn_actor(
+            sensor_bp,
+            carla.Transform(carla.Location(x=0.5, z=2.3), carla.Rotation(pitch=-5)),
+            attach_to=self._parent)
+        sensor.listen(lambda image: self._history.update_image(
+            image, "forward_center", "rgb"))
+        self._recording_sensors.append(sensor)
+        """if not self.eval:
+            sensor = self._parent.get_world().spawn_actor(
+                sensor_bp,
+                carla.Transform(carla.Location(x=0.5, y=-0.7, z=2.3), carla.Rotation(pitch=-5)),
+                attach_to=self._parent)
+            sensor.listen(lambda image: self._history.update_image(
+                image, "forward_left", "rgb"))
+            self._recording_sensors.append(sensor)
+
+            sensor = self._parent.get_world().spawn_actor(
+                sensor_bp,
+                carla.Transform(carla.Location(x=0.5, y=0.7, z=2.3), carla.Rotation(pitch=-5)),
+                attach_to=self._parent)
+            sensor.listen(lambda image: self._history.update_image(
+                image, "forward_right", "rgb"))
+            self._recording_sensors.append(sensor)
+
+            sensor = self._parent.get_world().spawn_actor(
+                sensor_bp,
+                carla.Transform(carla.Location(x=0, y=-0.5, z=1.8), carla.Rotation(pitch=-20, yaw=-90)),
+                attach_to=self._parent)
+            sensor.listen(lambda image: self._history.update_image(
+                image, "left_center", "rgb"))
+            self._recording_sensors.append(sensor)
+
+            sensor = self._parent.get_world().spawn_actor(
+                sensor_bp,
+                carla.Transform(carla.Location(x=0, y=0.5, z=1.8), carla.Rotation(pitch=-20, yaw=90)),
+                attach_to=self._parent)
+            sensor.listen(lambda image: self._history.update_image(
+                image, "right_center", "rgb"))
+            self._recording_sensors.append(sensor)"""
+
+        if self._hq_recording:
+            sensor_bp = self._parent.get_world().get_blueprint_library().find(
+                'sensor.camera.rgb')
+            sensor_bp.set_attribute('image_size_x', "1920")
+            sensor_bp.set_attribute('image_size_y', "1080")
+
+            sensor = self._parent.get_world().spawn_actor(
+                sensor_bp,
+                carla.Transform(carla.Location(x=-0.5, z=2.0)),
+                attach_to=self._parent)
+            sensor.listen(lambda image: self._history.update_image_hq(
+                image, "hq_record", "rgb"))
+            self._recording_sensors.append(sensor)
+
+    def _destroy_sensors(self):
+        for sensor in self._recording_sensors:
+            sensor.destroy()
+
+        if self.sensor is not None:
+            self.sensor.destroy
 
     def toggle_camera(self):
         self.transform_index = (self.transform_index + 1) % len(self._camera_transforms)
@@ -884,8 +1055,22 @@ class CameraManager(object):
         self.set_sensor(self.index + 1)
 
     def toggle_recording(self):
+        if self.recording:
+            self.hud.notification('Writing data to disk, please wait..')
+            self._history.save_to_disk()
+            self.hud.notification('Writing complete!')
+        else:
+            self._history._active = True
+
         self.recording = not self.recording
-        self.hud.notification('Recording %s' % ('On' if self.recording else 'Off'))
+        self.hud.notification(
+            'Recording %s' % ('On' if self.recording else 'Off'))
+
+    def tick(self):
+        if self.recording and self.hud.simulation_time - self.hud._episode_start_time > 1.5:
+            if self._frame_number % self._capture_rate == 0:
+                self._history.record_frame(self._parent, self._client_ap)
+            self._frame_number += 1
 
     def render(self, display):
         if self.surface is not None:
@@ -906,7 +1091,7 @@ class CameraManager(object):
             lidar_data = lidar_data.astype(np.int32)
             lidar_data = np.reshape(lidar_data, (-1, 2))
             lidar_img_size = (self.hud.dim[0], self.hud.dim[1], 3)
-            lidar_img = np.zeros((lidar_img_size), dtype = int)
+            lidar_img = np.zeros((lidar_img_size), dtype=int)
             lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
             self.surface = pygame.surfarray.make_surface(lidar_img)
         else:
@@ -918,6 +1103,153 @@ class CameraManager(object):
             self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
         if self.recording:
             image.save_to_disk('_out/%08d' % image.frame)
+
+
+class ControlType(Enum):
+    MANUAL = 0
+    CLIENT_AP = 1
+    SERVER_AP = 2
+    DRIVE_MODEL = 3
+
+
+class History:
+    def __init__(self, output_folder):
+        self._latest_images = {}
+        self._image_history = []
+        self._measurements_history = []
+        self._frame_number = 0
+        self._output_folder = output_folder
+        self._timestamp = None
+        self._driving_log = None
+        self._active = False
+        self._latest_client_autopilot_control = None
+        self.control_type = ControlType.MANUAL
+        self._latest_hlc = None
+        self._left_lane_change_valid = None
+        self._right_lane_change_valid = None
+
+        self._weather_index = 0
+
+    def _initiate(self):
+        if self._active:
+            self.save_to_disk()
+
+        self._driving_log = pd.DataFrame(columns=[
+            "ForwardCenter", "ForwardLeft", "ForwardRight", "LeftCenter",
+            "RightCenter", "Location", "Velocity", "Controls", "ClientAutopilotControls", "ControlType",
+            "LeftLaneChangeValid", "RightLaneChangeValid", "TrafficLight",
+            "SpeedLimit", "HLC", "WheaterId"
+        ])
+        self._timestamp = time.strftime("%Y-%m-%d_%H-%M-%S",
+                                        time.localtime(time.time()))
+
+        self._latest_images = {}
+        self._image_history = []
+        self._measurements_history = []
+        self._frame_number = 0
+        self._latest_client_autopilot_control = None
+        self._latest_hlc = RoadOption.LANEFOLLOW
+
+    def update_weather_index(self, weather_index):
+        self._weather_index = weather_index
+
+    def update_image(self, image, position, sensor_type):
+        if image.raw_data:
+            img = np.reshape(np.array(image.raw_data), (160, 350, 4))[:, :, :3]
+            self._latest_images[position + "_" + sensor_type] = img
+
+    def update_left_lane_change_valid(self, is_valid):
+        self._left_lane_change_valid = is_valid
+
+    def update_right_lane_change_valid(self, is_valid):
+        self._right_lane_change_valid = is_valid
+
+    def update_image_hq(self, image, position, sensor_type):
+        if image.raw_data:
+            img = np.reshape(np.array(image.raw_data), (1080, 1920, 4))[:, :, :3]
+            self._latest_images[position + "_" + sensor_type] = img
+
+    def update_client_autopilot_control(self, control):
+        self._latest_client_autopilot_control = control
+
+    def update_hlc(self, hlc):
+        self._latest_hlc = hlc
+
+    def record_frame(self, player, client_ap):
+        images = []
+        self._frame_number += 1
+
+        v = player.get_velocity()
+        t = player.get_transform()
+        c = player.get_control()
+
+        if self.control_type == ControlType.CLIENT_AP:
+            if not self._latest_client_autopilot_control:
+                return
+            client_ap_c = self._latest_client_autopilot_control
+
+            hlc = client_ap._local_planner._target_road_option
+
+        else:
+            client_ap_c = None
+            hlc = self._latest_hlc
+
+        for name, image in self._latest_images.items():
+            images.append((name + "_%08d.png" % self._frame_number, image))
+
+        self._image_history.append(images)
+
+        output_path = Path(self._output_folder + '/' + self._timestamp)
+        image_path = output_path / "imgs"
+
+        red_light = 0 if player.get_traffic_light_state(
+        ) == carla.TrafficLightState.Red else 1
+
+        speed = math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2)
+        if math.isnan(c.steer) or (self.control_type == ControlType.CLIENT_AP and math.isnan(client_ap_c.steer)):
+            return
+
+        self._driving_log = self._driving_log.append(
+            pd.Series([
+                "imgs/forward_center_rgb_%08d.png" % self._frame_number,
+                "imgs/forward_left_rgb_%08d.png" % self._frame_number,
+                "imgs/forward_right_rgb_%08d.png" % self._frame_number,
+                "imgs/left_center_rgb_%08d.png" % self._frame_number,
+                "imgs/right_center_rgb_%08d.png" % self._frame_number,
+                (t.location.x, t.location.y),
+                speed,
+                (c.throttle, c.steer, c.brake),
+                (client_ap_c.throttle, client_ap_c.steer,
+                 client_ap_c.brake) if self.control_type == ControlType.CLIENT_AP else -1,
+                self.control_type.value,
+                1 if self._left_lane_change_valid else 0,
+                1 if self._right_lane_change_valid else 0,
+                red_light,
+                player.get_speed_limit() / 3.6,
+                hlc.value,
+                self._weather_index
+            ],
+                index=self._driving_log.columns),
+            ignore_index=True)
+
+    def save_to_disk(self):
+
+        output_path = Path(self._output_folder + '/' + self._timestamp)
+        image_path = output_path / "imgs"
+        image_path.mkdir(parents=True, exist_ok=True)
+
+        for frame in self._image_history:
+            for name, image in frame:
+                cv2.imwrite(str(image_path / name), image)
+
+        csv_path = str(output_path / "driving_log.csv")
+        if not os.path.isfile(csv_path):
+            self._driving_log.to_csv(csv_path)
+        else:
+            self._driving_log.to_csv(csv_path, mode="a", header=False)
+
+        self._active = False
+        self._initiate()
 
 
 # ==============================================================================
@@ -939,7 +1271,8 @@ def game_loop(args):
             pygame.HWSURFACE | pygame.DOUBLEBUF)
 
         hud = HUD(args.width, args.height)
-        world = World(client.get_world(), hud, args)
+        history = History("output")
+        world = World(client.get_world(), hud, args, history)
         controller = KeyboardControl(world, args.autopilot)
 
         clock = pygame.time.Clock()
@@ -1030,5 +1363,4 @@ def main():
 
 
 if __name__ == '__main__':
-
     main()

@@ -11,7 +11,7 @@ import os
 import sys
 
 try:
-    sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
+    sys.path.append(glob.glob('./carla/dist/carla-*%d.%d-%s.egg' % (
         sys.version_info.major,
         sys.version_info.minor,
         'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
@@ -135,9 +135,9 @@ def main():
     world = client.get_world()
 
     try:
-        m = world.get_map()
+        m = world.get_map()  # type: carla.Map
         start_pose = random.choice(m.get_spawn_points())
-        waypoint = m.get_waypoint(start_pose.location)
+        waypoint = m.get_waypoint(start_pose.location)  # type: carla.Waypoint
 
         blueprint_library = world.get_blueprint_library()
 
