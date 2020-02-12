@@ -4,7 +4,7 @@
 # ## Imports
 
 # In[1]:
-
+from ast import literal_eval
 
 import sys
 
@@ -23,32 +23,30 @@ import time
 import itertools
 from glob import glob
 from pathlib import Path
-#from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-#from tensorflow.keras.models import Model
-#from tensorflow.keras.optimizers import Adam
-#from tensorflow.keras.layers import Input, Flatten, Dense, Cropping2D, Conv2D, concatenate, TimeDistributed, CuDNNLSTM
-#from tensorflow.keras.utils import Sequence
+# from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.optimizers import Adam
+# from tensorflow.keras.layers import Input, Flatten, Dense, Cropping2D, Conv2D, concatenate, TimeDistributed, CuDNNLSTM
+# from tensorflow.keras.utils import Sequence
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.layers import Input, Flatten, Dense, Cropping2D, Conv2D, concatenate, TimeDistributed, CuDNNLSTM
-from keras.utils import Sequence
+from keras.utils import Sequence, plot_model
 import random
 from keras_segmentation.predict import model_from_checkpoint_path
 from keras.backend import tf
 
-checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
-
-
+checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
 
 import tensorflow.keras.backend as K
 import scipy
+
 # import pydotplus
 
 print(tf.__version__)
 print(cv2.__version__)
 print(os.environ["CONDA_DEFAULT_ENV"])
-
 
 # ## Helper functions
 #
@@ -56,8 +54,9 @@ print(os.environ["CONDA_DEFAULT_ENV"])
 # In[2]:
 
 
-hlc_one_hot = { 0: [1,0,0], 1:[0,1,0], 2:[0,0,1] }
-#hlc_one_hot = { 1: [1,0,0,0], 2:[0,1,0,0], 3:[0,0,1,0], 4:[0,0,0,1]}
+# hlc_one_hot = { 0: [1,0,0], 1:[0,1,0], 2:[0,0,1] }
+hlc_one_hot = {1: [1, 0, 0, 0], 2: [0, 1, 0, 0], 3: [0, 0, 1, 0], 4: [0, 0, 0, 1]}
+
 
 def flatten_list(items_list):
     """ Removes the episode dimension from a list of data points """
@@ -67,33 +66,39 @@ def flatten_list(items_list):
             ret.append(item)
     return ret
 
+
 # Custom loss function
 def weighted_mse(y_true, y_pred, weight_mask):
     """
     Custom loss fucntion, different weigted loss to steer/throttle
     Used when all outputs is evaluated by same loss function
     """
-    return K.mean(K.square(y_pred - y_true)*weight_mask, axis=-1)
+    return K.mean(K.square(y_pred - y_true) * weight_mask, axis=-1)
+
 
 def root_mean_squared_error(y_true, y_pred):
     """ Custom loss function, RMSE """
     return K.sqrt(K.mean(K.square(y_pred - y_true)))
+
 
 def mean_squared_error(y_true, y_pred):
     """ Custom loss function, RMSE """
     return K.mean(K.square(y_pred - y_true))
 
 
-
 def steer_loss():
     """ Loss function for steering, RMSE """
+
     def custom(y_true, y_pred):
         return root_mean_squared_error(y_true, y_pred)
+
     return custom
+
 
 def get_hlc_one_hot(hlc):
     """ One-hot encode HLC values """
     return hlc_one_hot[hlc]
+
 
 def sine_encode(angle):
     """ Encode steering angle as sine wave """
@@ -101,23 +106,26 @@ def sine_encode(angle):
     N = 10
     ret = []
 
-    for i in range(1,N+1,1):
-        Y = np.sin(((2*np.pi*(i-1))/(N-1))-((angle*np.pi)/(2*angle_max)))
+    for i in range(1, N + 1, 1):
+        Y = np.sin(((2 * np.pi * (i - 1)) / (N - 1)) - ((angle * np.pi) / (2 * angle_max)))
         ret.append(Y)
 
     return np.array(ret)
 
+
 def create_input_dict():
     return {
         "forward_imgs": [],
-        "hlcs" : [],
+        "hlcs": [],
     }
+
 
 def create_target_dict():
     return {
-        "steer" : [],
+        "steer": [],
         "throttle": [],
     }
+
 
 def split_dict(dictionary, split_pos):
     """ Split data into training and validation """
@@ -129,6 +137,8 @@ def split_dict(dictionary, split_pos):
         val_dict[key] = dictionary[key][split_pos:]
 
     return train_dict, val_dict
+
+
 """
 def adjust_hlcs(hlcs, info_signals):
     Randomly adjust HLC backwards, 
@@ -160,6 +170,8 @@ def adjust_hlcs(hlcs, info_signals):
                     changed = 0 
     return hlcs 
 """
+
+
 #### BALANCING DATA - Helper functions ####
 def get_hlc_dist_label(hlc):
     " Get distributions of HLC in data "
@@ -170,6 +182,7 @@ def get_hlc_dist_label(hlc):
     elif hlc == 1:
         return "straight"
 
+
 def get_speed_dist_label(speed):
     """ Get distributions of speed in data """
 
@@ -177,6 +190,7 @@ def get_speed_dist_label(speed):
         return "low_speed"
     else:
         return "high_speed"
+
 
 def get_speed_limit_dist_label(speed_limit):
     """ Get distributions of speed limits in data """
@@ -189,17 +203,19 @@ def get_speed_limit_dist_label(speed_limit):
     elif speed_limit == 0.9:
         return "90km/h"
 
+
 def get_percentage_dist(dist):
     """ Get distribution of data in percentage """
     N = dist["traffic_light"]["red"] + dist["traffic_light"]["green"]
     for dist_key in dist:
         for key, dist_val in dist[dist_key].items():
-            dist[dist_key][key] = dist_val/N
+            dist[dist_key][key] = dist_val / N
     return dist
+
 
 def get_drop_num(tot_num, num, keep_fraction):
     """ Calculates how many datasamples one should drop to get the right amount of data samples """
-    return int((num - keep_fraction*tot_num)/(1-keep_fraction))
+    return int((num - keep_fraction * tot_num) / (1 - keep_fraction))
 
 
 def shuffle_data(inputs_flat, targets_flat):
@@ -214,7 +230,6 @@ def shuffle_data(inputs_flat, targets_flat):
         targets_flat[key] = np.array(targets_flat[key])[indices]
 
     return inputs_flat, targets_flat
-
 
 
 # ## Data Augmentations
@@ -235,8 +250,11 @@ def shuffle_data(inputs_flat, targets_flat):
 
 
 import random
+
+
 def get_path(episode_path, image_path):
-    return str(episode_path / Path("images") / image_path.split("/")[-1])
+    return str(episode_path / Path("imgs") / image_path.split("/")[-1])
+
 
 def load_driving_logs(dataset_folders, steering_correction):
     """
@@ -255,7 +273,6 @@ def load_driving_logs(dataset_folders, steering_correction):
     """
     img_paths_center = []
 
-
     inputs = create_input_dict()
 
     targets = create_target_dict()
@@ -264,11 +281,10 @@ def load_driving_logs(dataset_folders, steering_correction):
         folder_path = Path("dataset") / folder
         for episode in glob(str(folder_path / "*")):
 
-
             temp_forward = {"center": [], "left": [], "right": []}
-            temp_hlcs =  {"center": [], "left": [], "right": []}
+            temp_hlcs = {"center": [], "left": [], "right": []}
 
-            temp_steer =  {"center": [], "left": [], "right": []}
+            temp_steer = {"center": [], "left": [], "right": []}
             temp_throttle = {"center": [], "left": [], "right": []}
 
             episode_path = Path(episode)
@@ -278,19 +294,19 @@ def load_driving_logs(dataset_folders, steering_correction):
                 if index == 0:
                     continue
 
-                steer = row["angle"]
-                throttle = row["speed"]
+                [throttle, steer, brake] = literal_eval(row["ClientAutopilotControls"])
+                # steer = row["angle"]
+                # throttle = row["speed"]
 
-                hlc = row["high_level_command"]
-                #if hlc == 0 or hlc == -1:
-                #    hlc = 4
+                hlc = row["HLC"]
+                if hlc == 0 or hlc == -1:
+                    hlc = 4
                 hlc = get_hlc_one_hot(hlc)
 
-                temp_forward["center"].append(get_path(episode_path, row["image_path"]))
+                temp_forward["center"].append(get_path(episode_path, row["ForwardCenter"]))
                 temp_steer["center"].append(steer)
                 temp_throttle["center"].append(throttle)
                 temp_hlcs["center"].append(hlc)
-
 
             inputs["forward_imgs"].append(temp_forward["center"])
 
@@ -300,10 +316,9 @@ def load_driving_logs(dataset_folders, steering_correction):
 
             targets["throttle"].append(temp_throttle["center"])
 
-
     print("Done, {:d} episode(s) loaded.".format(len(inputs["forward_imgs"])))
 
-    return(inputs, targets)
+    return (inputs, targets)
 
 
 # ## Plot Data
@@ -316,50 +331,48 @@ def plot_data(dist, title=""):
     print("Plotting...")
     tot_num = 0
 
-    fig = plt.figure(figsize=(16,6))
+    fig = plt.figure(figsize=(16, 6))
 
     # HLC
-    labels =["Left", "Right", "Straight"]
+    labels = ["Left", "Right", "Straight"]
     sizes = [dist["hlc"]["left"], dist["hlc"]["right"], dist["hlc"]["straight"]]
 
-    ax1 = fig.add_subplot(1,4,1)
+    ax1 = fig.add_subplot(1, 4, 1)
     wedges, texts, autotexts = ax1.pie(sizes, autopct='%.1f%%')
     for autotext in autotexts:
         autotext.set_color('white')
         autotext.set_fontweight('bold')
 
     ax1.set_title("Distrubution of HLC")
-    ax1.legend(wedges,labels, loc="best")
+    ax1.legend(wedges, labels, loc="best")
     ax1.axis('equal')
 
-
     # Speed
-    labels =["Low Speed", "High Speed"]
+    labels = ["Low Speed", "High Speed"]
     sizes = [dist["speed"]["low"], dist["speed"]["high"]]
 
-    ax2 = fig.add_subplot(1,4,2)
+    ax2 = fig.add_subplot(1, 4, 2)
     wedges, texts, autotexts = ax2.pie(sizes, autopct='%.1f%%')
     for autotext in autotexts:
         autotext.set_color('white')
         autotext.set_fontweight('bold')
     ax2.set_title("Distrubution of speed")
-    ax2.legend(wedges,labels, loc="best")
+    ax2.legend(wedges, labels, loc="best")
     ax2.axis('equal')
 
     # Steering
-    labels =["Left", "Straight", "Right"]
+    labels = ["Left", "Straight", "Right"]
     print("Dist: ", dist)
     sizes = [dist["steering"]["left"], dist["steering"]["straight"], dist["steering"]["right"]]
 
-    ax2 = fig.add_subplot(1,4,3)
+    ax2 = fig.add_subplot(1, 4, 3)
     wedges, texts, autotexts = ax2.pie(sizes, autopct='%.1f%%')
     for autotext in autotexts:
         autotext.set_color('white')
         autotext.set_fontweight('bold')
     ax2.set_title("Distrubution of steering angle")
-    ax2.legend(wedges,labels, loc="best")
+    ax2.legend(wedges, labels, loc="best")
     ax2.axis('equal')
-
 
     fig.suptitle(title + ": " + str(tot_num) + " sequences", fontsize=18)
     plt.show()
@@ -371,6 +384,8 @@ def plot_data(dist, title=""):
 # - Balance data for LSTM
 
 # In[5]:
+
+STEERING_ANGLE_THRESHOLD = 0.05
 
 
 def get_dist(inputs, targets):
@@ -389,18 +404,18 @@ def get_dist(inputs, targets):
             "straight": 0,
         },
         "steering": {
-            "left": 0, # More than 20 deg left
-            "right": 0, # More than 20 deg right
-            "straight": 0 # Between left and right
+            "left": 0,  # More than 20 deg left
+            "right": 0,  # More than 20 deg right
+            "straight": 0  # Between left and right
         },
         "speed": {
-            "high": 0, #More than 0.5m/s
-            "low": 0 #Less than 0.5 m/s
+            "high": 0,  # More than 0.5m/s
+            "low": 0  # Less than 0.5 m/s
         }
 
     }
 
-    #print("getting dist", inputs, targets)
+    # print("getting dist", inputs, targets)
     # HLC distribution
     for hlcs in inputs["hlcs"]:
 
@@ -414,23 +429,21 @@ def get_dist(inputs, targets):
             elif hlc_value == 2:
                 dist["hlc"]["right"] += 1
 
-
     # Speed distribution
     for speed in targets["throttle"]:
         if speed > 0.5:
-            dist["speed"]["high"] +=1
+            dist["speed"]["high"] += 1
         else:
-            dist["speed"]["low"] +=1
-
+            dist["speed"]["low"] += 1
 
     # Steering distribution
     for angle in targets["steer"]:
-        if angle < -0.1:
-            dist["steering"]["left"] +=1
-        elif angle > 0.1:
+        if angle < -STEERING_ANGLE_THRESHOLD:
+            dist["steering"]["left"] += 1
+        elif angle > STEERING_ANGLE_THRESHOLD:
             dist["steering"]["right"] += 1
         else:
-            dist["steering"]["straight"] +=1
+            dist["steering"]["straight"] += 1
 
     return dist
 
@@ -450,8 +463,8 @@ def balance_steering_angle(inputs, targets, dist, target_straight_fraction):
 
     for i in range(len(inputs["hlcs"])):
         angle = targets["steer"][i]
-        is_left = angle < -0.1
-        is_right = angle > 0.1
+        is_left = angle < -STEERING_ANGLE_THRESHOLD
+        is_right = angle > STEERING_ANGLE_THRESHOLD
 
         if is_left and left_count >= least_vals:
             continue
@@ -478,7 +491,7 @@ def balance_steering_angle(inputs, targets, dist, target_straight_fraction):
     return inputs_bal, targets_bal
 
 
-def balance_data_lstm(inputs, targets, straight_angle_frac=0.2,debug=False, drop=False):
+def balance_data_lstm(inputs, targets, straight_angle_frac=0.2, debug=False, drop=False):
     """ Balance dataset for LSTM data """
     print("Balancing data:")
 
@@ -496,12 +509,11 @@ def balance_data_lstm(inputs, targets, straight_angle_frac=0.2,debug=False, drop
     dist_bal = get_dist(inputs_bal, targets_bal)
     print("dist_bal: ", dist_bal)
 
-
     # Shuffle
     inputs_bal, targets_bal = shuffle_data(inputs_bal, targets_bal)
 
     if drop:
-        inputs_bal, targets_bal = drop_follow_lane(inputs_bal,targets_bal, 3)
+        inputs_bal, targets_bal = drop_follow_lane(inputs_bal, targets_bal, 3)
 
     dist_bal = get_dist(inputs_bal, targets_bal)
 
@@ -520,9 +532,7 @@ def drop_follow_lane(inputs, targets, keep_every):
     inputs_dropped = create_input_dict()
     targets_dropped = create_target_dict()
 
-
     for i in range(len(inputs["forward_imgs"])):
-
 
         follow_lane = True
         # Iterate over all HLC in sequence
@@ -536,7 +546,7 @@ def drop_follow_lane(inputs, targets, keep_every):
         steer = targets["steer"][i]
 
         # Only drop if FOLLOW_LANE, no brake, and no turn
-        if follow_lane and abs(steer)<0.1:
+        if follow_lane and abs(steer) < 0.1:
             # Drop based on drop_rate
 
             if np.random.randint(keep_every) != 0:
@@ -551,7 +561,6 @@ def drop_follow_lane(inputs, targets, keep_every):
     return inputs_dropped, targets_dropped
 
 
-
 # # LSTM
 
 # ## Prepare dataset format
@@ -562,31 +571,33 @@ def drop_follow_lane(inputs, targets, keep_every):
 def get_episode_sequences(data, sampling_interval, seq_length):
     sequences = []
     slices = []
-    for o in range(sampling_interval+1):
-        slices.append(data[o::sampling_interval+1])
+    for o in range(sampling_interval + 1):
+        slices.append(data[o::sampling_interval + 1])
     for s in slices:
-        for o in range(0,len(s)):
+        for o in range(0, len(s)):
             if o + seq_length <= len(s):
-                sequences.append(s[o:o+seq_length])
+                sequences.append(s[o:o + seq_length])
     return sequences
 
-def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
 
+def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
     inputs_flat = create_input_dict()
     targets_flat = create_target_dict()
 
     for e in range(len(inputs["forward_imgs"])):
-        [inputs_flat["forward_imgs"].append(sequence) for sequence in get_episode_sequences(inputs["forward_imgs"][e],sampling_interval, seq_length)]
-        [inputs_flat["hlcs"].append(sequence) for sequence in get_episode_sequences(inputs["hlcs"][e],sampling_interval, seq_length)]
-        [targets_flat["steer"].append(sequence[-1]) for sequence in get_episode_sequences(targets["steer"][e],sampling_interval, seq_length)]
-        [targets_flat["throttle"].append(sequence[-1]) for sequence in get_episode_sequences(targets["throttle"][e],sampling_interval, seq_length)]
-
+        [inputs_flat["forward_imgs"].append(sequence) for sequence in
+         get_episode_sequences(inputs["forward_imgs"][e], sampling_interval, seq_length)]
+        [inputs_flat["hlcs"].append(sequence) for sequence in
+         get_episode_sequences(inputs["hlcs"][e], sampling_interval, seq_length)]
+        [targets_flat["steer"].append(sequence[-1]) for sequence in
+         get_episode_sequences(targets["steer"][e], sampling_interval, seq_length)]
+        [targets_flat["throttle"].append(sequence[-1]) for sequence in
+         get_episode_sequences(targets["throttle"][e], sampling_interval, seq_length)]
 
     # Shuffle
     inputs_flat, targets_flat = shuffle_data(inputs_flat, targets_flat)
 
-    return(inputs_flat, targets_flat)
-
+    return (inputs_flat, targets_flat)
 
 
 # ## Define model
@@ -596,41 +607,42 @@ def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
 
 def get_segmentation_model():
     segmentation_model = model_from_checkpoint_path(checkpoints_path)
-
-    x = segmentation_model.layers[-4].output
+    x = segmentation_model.layers[-14].output
     x = Flatten()(x)
 
     # Explicitly define new model input and output by slicing out old model layers
     model_new = Model(inputs=segmentation_model.layers[0].input,
                       outputs=x)
+    plot_model(model_new, "pspnet50_cut.png")
+    print(model_new.summary())
 
     for layer in model_new.layers:
         layer.trainable = False
 
     return model_new
 
-def get_lstm_model(seq_length, sine_steering=False, print_summary=True):
 
+def get_lstm_model(seq_length, sine_steering=False, print_summary=True):
     forward_image_input = Input(shape=(seq_length, 473, 473, 3), name="forward_image_input")
-    hlc_input = Input(shape=(seq_length,3), name="hlc_input")
+    hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
 
     segmentation_model = get_segmentation_model()
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
 
-    #x = TimeDistributed(Cropping2D(cropping=((50,0),(0,0))))(forward_image_input)
-    #x = TimeDistributed(Conv2D(24,(5,5),strides=(2,2), activation="relu"))(x)
-    #x = TimeDistributed(Conv2D(36,(5,5),strides=(2,2), activation="relu"))(x)
-    #x = TimeDistributed(Conv2D(48,(5,5),strides=(2,2), activation="relu"))(x)
-    #x = TimeDistributed(Conv2D(64,(3,3),strides=(2,2), activation="relu"))(x)
-    #x = TimeDistributed(Conv2D(64,(3,3), activation="relu"))(x)
-    #x = TimeDistributed(Conv2D(64,(3,3), activation="relu"))(x)
-    #conv_output = TimeDistributed(Flatten())(x)
+    # x = TimeDistributed(Cropping2D(cropping=((50,0),(0,0))))(forward_image_input)
+    # x = TimeDistributed(Conv2D(24,(5,5),strides=(2,2), activation="relu"))(x)
+    # x = TimeDistributed(Conv2D(36,(5,5),strides=(2,2), activation="relu"))(x)
+    # x = TimeDistributed(Conv2D(48,(5,5),strides=(2,2), activation="relu"))(x)
+    # x = TimeDistributed(Conv2D(64,(3,3),strides=(2,2), activation="relu"))(x)
+    # x = TimeDistributed(Conv2D(64,(3,3), activation="relu"))(x)
+    # x = TimeDistributed(Conv2D(64,(3,3), activation="relu"))(x)
+    # conv_output = TimeDistributed(Flatten())(x)
 
-    #x = concatenate([conv_output, hlc_input])
+    # x = concatenate([conv_output, hlc_input])
     x = concatenate([segmentation_output, hlc_input])
 
     x = TimeDistributed(Dense(100, activation="relu"))(x)
-    x = CuDNNLSTM(10, return_sequences = False)(x)
+    x = CuDNNLSTM(10, return_sequences=False)(x)
     steer_dim = 1 if not sine_steering else 10
     steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(x)
     """
@@ -651,15 +663,16 @@ def get_lstm_model(seq_length, sine_steering=False, print_summary=True):
     x = CuDNNLSTM(10, return_sequences = False)(x)
     """
     throtte_pred = Dense(1, name="throttle_pred")(x)
-
-    model = Model(inputs=[forward_image_input, hlc_input], outputs=[steer_pred,throtte_pred])
+    model = Model(inputs=[forward_image_input, hlc_input], outputs=[steer_pred, throtte_pred])
 
     if print_summary:
         model.summary()
+    plot_model(model, to_file='model.png')
 
     return model
 
-#mol = get_lstm_model(10)
+
+# mol = get_lstm_model(10)
 # get_segmentation_model()
 
 
@@ -690,28 +703,29 @@ class generator(Sequence):
         return int(np.ceil(len(self.inputs["forward_imgs"]) / float(self.batch_size)))
 
     def __getitem__(self, idx):
-        subset = np.arange(idx * self.batch_size,min((idx + 1) * self.batch_size,len(self.inputs["forward_imgs"])))
+        subset = np.arange(idx * self.batch_size, min((idx + 1) * self.batch_size, len(self.inputs["forward_imgs"])))
         forward_imgs = []
-        read_images = [[cv2.resize(cv2.imread(path), None, fx=0.5, fy=0.5) for path in seq] for seq in self.inputs["forward_imgs"][subset]]
+        read_images = [[cv2.imread(path) for path in seq] for seq in self.inputs["forward_imgs"][subset]]
         steer_pred = self.targets["steer"][subset]
         if self.sine_steering:
             steer_pred = np.array([sine_encode(steer) for steer in steer_pred])
         if not self.validation:
             for seq in read_images:
-                forward_imgs.append([get_image_array(cv2.cvtColor(image,cv2.COLOR_BGR2LAB), 473, 473, imgNorm="divide", ordering='') for image in seq])
+                forward_imgs.append(
+                    [get_image_array(image, 473, 473, imgNorm="sub_mean", ordering='channels_last') for image in seq])
         else:
             for seq in read_images:
-                forward_imgs.append([get_image_array(cv2.cvtColor(image,cv2.COLOR_BGR2LAB), 473, 473, imgNorm="divide", ordering='') for image in seq])
+                forward_imgs.append(
+                    [get_image_array(image, 473, 473, imgNorm="sub_mean", ordering='channels_last') for image in seq])
 
-        #forward_imgs = np.array(forward_imgs)/255.0 - 0.5
+        # forward_imgs = np.array(forward_imgs)/255.0 - 0.5
         return {
-            "forward_image_input": np.array(forward_imgs),
-            "hlc_input": self.inputs["hlcs"][subset]
-        }, {
-            "steer_pred": steer_pred,
-            "throttle_pred": self.targets["throttle"][subset],
-        }
-
+                   "forward_image_input": np.array(forward_imgs),
+                   "hlc_input": self.inputs["hlcs"][subset]
+               }, {
+                   "steer_pred": steer_pred,
+                   "throttle_pred": self.targets["throttle"][subset],
+               }
 
 
 # ## Parameters
@@ -721,11 +735,10 @@ class generator(Sequence):
 
 val_split = 0.8
 adjust_hlc = False
-balance_data = False
-
 
 epochs_list = [100]
-dataset_folders_lists = [["triangular_noise_glos_train"]]
+# dataset_folders_lists = [["Town01", "Town04"]]
+dataset_folders_lists = [["Town01_simple_noise", "Town01_simple_roaming_noise"]]
 """dataset_folders_lists = [([
     "etron/Town01/ClientAP/no_cars_no_rain",
     "etron/Town01/ClientAP/no_cars_no_rain_noise15",
@@ -741,28 +754,24 @@ dataset_folders_lists = [["triangular_noise_glos_train"]]
     "etron/Town01/ClientAP/brake_all_weather",
 ])]"""
 
-
 steering_corrections = [0.05]
 
-batch_sizes = [64]
+batch_sizes = [32]
 
-sampling_intervals = [3]
+sampling_intervals = [2, 3]
 
-seq_lengths = [1]
+seq_lengths = [1, 2]
 
-sine_steering_list = [False]
+sine_steering_list = [True, False]
 
-balance_data_list = [False]
-
-
-
+balance_data_list = [True, False]
 
 # ## Training loop
 
 # In[ ]:
 
 
-CuDNNLSTMparameter_permutations = itertools.product(epochs_list,
+parameter_permutations = itertools.product(epochs_list,
                                            dataset_folders_lists,
                                            steering_corrections,
                                            batch_sizes,
@@ -773,40 +782,40 @@ CuDNNLSTMparameter_permutations = itertools.product(epochs_list,
 
 # Train a new model for each parameter permutation, and save the best models
 model_name = input("Name of model test: ").strip()
-#balance_data = True if input("Balance data y/[n]: ").lower() == "y" else False
-#drop_data = True if input("Drop data y/[n]: ").lower() == "y" else False
+# balance_data = True if input("Balance data y/[n]: ").lower() == "y" else False
+# drop_data = True if input("Drop data y/[n]: ").lower() == "y" else False
 
-parameter_permutations_list = []#[p for p in parameter_permutations]
+parameter_permutations_list = [p for p in parameter_permutations]
 # glos_cycle_full_folders = ["glos_cycle_track_wet_clouded", "glos_cycle_noise_mini"]
 glos_cycle_full_folders = ["triangular_noise_glos_train"]
-parameter_permutations_list.append([epochs_list[0],
-                                glos_cycle_full_folders,
-                                steering_corrections[0],
-                                batch_sizes[0],
-                                sampling_intervals[0],
-                                seq_lengths[0],
-                                False,
-                                False])
-
-parameter_permutations_list.append([epochs_list[0],
-                                glos_cycle_full_folders,
-                                steering_corrections[0],
-                                batch_sizes[0],
-                                sampling_intervals[0],
-                                seq_lengths[0],
-                                True,
-                                False])
-
+# parameter_permutations_list.append([epochs_list[0],
+#                                 glos_cycle_full_folders,
+#                                 steering_corrections[0],
+#                                 batch_sizes[0],
+#                                 sampling_intervals[0],
+#                                 seq_lengths[0],
+#                                 False,
+#                                 False])
+#
+# parameter_permutations_list.append([epochs_list[0],
+#                                 glos_cycle_full_folders,
+#                                 steering_corrections[0],
+#                                 batch_sizes[0],
+#                                 sampling_intervals[0],
+#                                 seq_lengths[0],
+#                                 True,
+#                                 False])
 
 
 for parameters in parameter_permutations_list:
     # Get parameters
     epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data = parameters
-    parameters_string = ("epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\n\n"
-                         .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering, sampling_interval, seq_length))
+    parameters_string = (
+        "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\n\n"
+        .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
+                sampling_interval, seq_length))
 
-
-    #town1_dataset_folders, town4_dataset_folders = dataset_folders
+    # town1_dataset_folders, town4_dataset_folders = dataset_folders
 
     # Prepare for logging
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
@@ -821,8 +830,8 @@ for parameters in parameter_permutations_list:
     # Save config file to disk
     model_name = "lstm"
     config = configparser.ConfigParser()
-    config["ModelConfig"] = {'Model': model_name,'sequence_length': seq_length,'sampling_interval': sampling_interval}
-    with open(str(path/'config.ini'), 'w') as configfile:
+    config["ModelConfig"] = {'Model': model_name, 'sequence_length': seq_length, 'sampling_interval': sampling_interval}
+    with open(str(path / 'config.ini'), 'w') as configfile:
         config.write(configfile)
 
     # Load drive logs and paths
@@ -833,7 +842,7 @@ for parameters in parameter_permutations_list:
     if balance_data:
         # Plot data before balancing
         title_before = "Before Balancing"
-        #print("inputs_flat", inputs_flat)
+        # print("inputs_flat", inputs_flat)
         plot_data(get_dist(inputs_flat, targets_flat), title=title_before)
 
         # Balance data
@@ -842,7 +851,6 @@ for parameters in parameter_permutations_list:
         # Plot data after balancing
         title_after = "After Balancing"
         plot_data(dist_bal1, title=title_after)
-
 
     inputs_flat_dict = create_input_dict()
     targets_flat_dict = create_target_dict()
@@ -857,7 +865,7 @@ for parameters in parameter_permutations_list:
     inputs_flat, targets_flat = shuffle_data(inputs_flat, targets_flat)
 
     # Split into val and train
-    split_pos = int(val_split*len(inputs_flat["forward_imgs"]))
+    split_pos = int(val_split * len(inputs_flat["forward_imgs"]))
     inputs_train, inputs_val = split_dict(inputs_flat, split_pos)
     targets_train, targets_val = split_dict(targets_flat, split_pos)
 
@@ -871,29 +879,26 @@ for parameters in parameter_permutations_list:
     print("Training set size: " + str(train_num))
     print("Validation set size: " + str(val_num))
 
-    input("Stop before load").strip()
     # Get model
     model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering)
-    input("Stop after load").strip()
 
     # Compile model
-    model.compile(loss=[steer_loss(), mean_squared_error] , optimizer=Adam())
-    input("Stop after compile").strip()
-    checkpoint_val = ModelCheckpoint(str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}.h5')), monitor='val_loss', verbose=1, save_best_only=False,mode="min")
+    model.compile(loss=[steer_loss(), mean_squared_error], optimizer=Adam())
+    checkpoint_val = ModelCheckpoint(
+        str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}.h5')), monitor='val_loss',
+        verbose=1, save_best_only=False, mode="min")
 
     # Create image of model architecture
-    #plot_model(model, str(path/'model.png'))
+    # plot_model(model, str(path/'model.png'))
 
-    steps = int(train_num/batch_size)
-    steps_val = int(val_num/batch_size)
-
+    steps = int(train_num / batch_size)
+    steps_val = int(val_num / batch_size)
 
     # Define early stopping params
     es = EarlyStopping(monitor='val_steer_pred_loss', mode='min', verbose=1, patience=8)
 
     # Train model
     print(model.summary())
-    input("Stop before fit").strip()
     history_object = model.fit_generator(
         generator(inputs_train, targets_train, batch_size, sine_steering=sine_steering),
         validation_data=generator(inputs_val, targets_val, batch_size, validation=True, sine_steering=sine_steering),
@@ -901,8 +906,8 @@ for parameters in parameter_permutations_list:
         verbose=1,
         callbacks=[checkpoint_val, es],
         steps_per_epoch=steps,
-        validation_steps = steps_val,
-        use_multiprocessing = False,
+        validation_steps=steps_val,
+        use_multiprocessing=False,
         workers=1
     )
 
@@ -921,23 +926,15 @@ for parameters in parameter_permutations_list:
     ax.set_ylabel("mse")
 
     lgd = ax.legend(['steer loss',
-               'steer validation loss',
-               'throttle loss',
-               'throttle validation loss'], bbox_to_anchor=(1.1, 1.05))
+                     'steer validation loss',
+                     'throttle loss',
+                     'throttle validation loss'], bbox_to_anchor=(1.1, 1.05))
 
     plt.show()
     fig.savefig(str(path / 'loss.png'), bbox_extra_artists=(lgd,), bbox_inches='tight')
     print('\n\n\n\n')
 
-
 # In[ ]:
 
 
-
-
-
 # In[ ]:
-
-
-
-
