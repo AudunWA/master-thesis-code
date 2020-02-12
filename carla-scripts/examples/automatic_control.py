@@ -121,7 +121,7 @@ class World(object):
             self.player = self.world.try_spawn_actor(blueprint, spawn_point)
         while self.player is None:
             spawn_points = self.map.get_spawn_points()
-            spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
+            spawn_point = spawn_points[0]  # random.choice(spawn_points) if spawn_points else carla.Transform()
             self.player = self.world.try_spawn_actor(blueprint, spawn_point)
         # Set up the sensors.
         self.collision_sensor = CollisionSensor(self.player, self.hud)
@@ -584,6 +584,7 @@ def game_loop(args):
     try:
         client = carla.Client(args.host, args.port)
         client.set_timeout(4.0)
+        client.load_world("Town01")
 
         display = pygame.display.set_mode(
             (args.width, args.height),
@@ -593,22 +594,30 @@ def game_loop(args):
         world = World(client.get_world(), hud, args.filter)
         controller = KeyboardControl(world)
 
-        if args.agent == "Roaming":
-            agent = RoamingAgent(world.player)
-        else:
-            agent = BasicAgent(world.player)
-            spawn_point = world.map.get_spawn_points()[0]
-            agent.set_destination((spawn_point.location.x,
-                                   spawn_point.location.y,
-                                   spawn_point.location.z))
+        #if args.agent == "Roaming":
+        #    agent = RoamingAgent(world.player)
+       # else:
+        agent = BasicAgent(world.player, 50)
+        spawn_point = world.map.get_spawn_points()[1]
+        agent.\
+                    set_destination((spawn_point.location.x,
+                               spawn_point.location.y,
+                               spawn_point.location.z))
 
         clock = pygame.time.Clock()
+
+        # Enable synchronous mode
+        sim_settings = client.get_world().get_settings()
+        sim_settings.fixed_delta_seconds = 0.1
+        sim_settings.synchronous_mode = True
+        client.get_world().apply_settings(sim_settings)
+
         while True:
             if controller.parse_events():
                 return
 
             # as soon as the server is ready continue!
-            world.world.wait_for_tick(10.0)
+            world.world.tick()
 
             world.tick(clock)
             world.render(display)

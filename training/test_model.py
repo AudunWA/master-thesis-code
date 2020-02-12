@@ -1,19 +1,20 @@
 import os
 import random
 from keras_segmentation.predict import model_from_checkpoint_path
-from keras.backend import tf
 
 random.seed(1)
-checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_eight"
 #checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
-print(open(checkpoints_path + "_config.json").readlines())
+
+checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
 
 checkpoint = model_from_checkpoint_path(checkpoints_path)
 
-filenames = os.listdir("dataset/images")
+filenames = os.listdir("predict_test_data/carla_images_2")
 #print("Sorting", len(filenames))
 #filenames.sort(key=lambda x: int(x.replace(".jpg", "")))
 #print("Done sorting", len(filenames))
+
+
 
 for filename in filenames:
     in_name = os.path.join("./dataset/images/", filename)

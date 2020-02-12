@@ -214,4 +214,7 @@ segmentation-prediction/dataset
 training/mobilenet_checkpoints
 training/pspnet_checkpoints/
 
+output
+
+
 
