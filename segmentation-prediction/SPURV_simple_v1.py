@@ -35,9 +35,11 @@ from keras.layers import Input, Flatten, Dense, Cropping2D, Conv2D, concatenate,
 from keras.utils import Sequence
 import random
 from keras_segmentation.predict import model_from_checkpoint_path
+from keras_segmentation.models.pspnet import pspnet_50
 from keras.backend import tf
 
-checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
+three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
+seven_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_seven"
 
 
 
@@ -594,9 +596,17 @@ def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
 # In[8]:
 
 
-def get_segmentation_model():
-    segmentation_model = model_from_checkpoint_path(checkpoints_path)
+def get_segmentation_model(model_type):
 
+    segmentation_model = None
+    if model_type == "three_class_trained":
+        segmentation_model = model_from_checkpoint_path(three_class_checkpoints_path)
+
+    elif model_type == "seven_class_trained":
+        segmentation_model = model_from_checkpoint_path(seven_class_checkpoints_path)
+
+    elif model_type == "pretrained":
+        segmentation_model = pspnet_50()
     x = segmentation_model.layers[-4].output
     x = Flatten()(x)
 

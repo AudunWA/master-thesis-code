@@ -1,23 +1,20 @@
  #%%
 from keras import Model
-from keras_segmentation.models.unet import vgg_unet
+from keras_segmentation.models.pspnet import pspnet_50
 
 
-model = vgg_unet(n_classes=2 ,  input_height=3456, input_width=4808)
+model = pspnet_50(n_classes=7 ,  input_height=3456, input_width=4808)
 
-#model = pspnet_101_cityscapes() # load the pretrained model trained on Cityscapes dataset
-
-# model = pspnet_101_voc12() # load the pretrained model trained on Pascal VOC 2012 dataset
 
 
 # load any of the 3 pretrained models
-image_dir = "../prepare_segmentation_data/data/input"
-segmentation_dir = "../prepare_segmentation_data/data/results"
+image_dir = "../prepare_segmentation_data/data/dataset/images_prepped_train"
+segmentation_dir = "../prepare_segmentation_data/data/dataset/annotations_prepped_train"
 
 model.train(
     train_images =  image_dir,
     train_annotations = segmentation_dir,
-    checkpoints_path = "/tmp/vgg_unet_1" , epochs=5
+    checkpoints_path = "psp" , epochs=5
 )
 
 out = model.predict_segmentation(
