@@ -54,8 +54,10 @@ def get_models(models_folder):
         # Read config file 
         config = ConfigParser()
         config.read(config_path)
-        seq_length = int(config.get("ModelConfig", "sequence_length", fallback=None))
-        sampling_interval = int(config.get("ModelConfig", "sampling_interval", fallback=None))
+        seq_length = int(config.get("ModelConfig", "sequence_length", fallback=1))
+        sampling_interval = int(config.get("ModelConfig", "sampling_interval", fallback=1))
+        model_type = config.get("ModelConfig", "model", fallback=None)
+        segmentation_network = config.get("ModelConfig", "seg_network_path", fallback=None)
 
         if seq_length is None: 
             print("ERROR: No sequence length found in model config in folder: " + model_folder)
@@ -64,7 +66,7 @@ def get_models(models_folder):
             print("ERROR: No sampling interval found in model config in folder: " + model_folder)
             return False
 
-        models.append((model_path, seq_length, sampling_interval))
+        models.append((model_path, seq_length, sampling_interval, model_type, segmentation_network))
 
     return models 
         

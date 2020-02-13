@@ -57,20 +57,19 @@ Use ARROWS or WASD keys for control.
 
 from __future__ import print_function
 
-# ==============================================================================
-# -- find carla module ---------------------------------------------------------
-# ==============================================================================
-
-
 import glob
 import os
 import sys
-
 # This is an alternative to running easy_install <carla egg file>
 from typing import Optional, List
 
 from agents.navigation.agent import Agent
 from agents.navigation.basic_agent import BasicAgent
+from utils import init_tensorflow
+
+# ==============================================================================
+# -- find carla module ---------------------------------------------------------
+# ==============================================================================
 
 try:
     sys.path.append(glob.glob('./carla/dist/carla-*%d.%d-%s.egg' % (
@@ -93,39 +92,26 @@ from carla import ColorConverter as cc
 
 from pathlib import Path
 
-from drive_models import LSTMKeras
+from drive_models import LSTMKeras, CNNKeras, SegmentationModel
 
 import cv2
 import time
 import ast
-import numpy as np
 import pandas as pd
 
 # Import ConfigParser for wheel
 from enums import WeatherType, ControlType, EventType, Environment
-
-if sys.version_info >= (3, 0):
-
-    from configparser import ConfigParser
-
-else:
-
-    from ConfigParser import RawConfigParser as ConfigParser
-
-from agents.navigation.roaming_agent import RoamingAgent
+from configparser import ConfigParser
 from agents.navigation.local_planner import RoadOption
 
-from agents.tools.misc import distance_vehicle
 from misc import get_distance
 from vehicle_spawner import VehicleSpawner
-from helpers import is_valid_lane_change, get_parameter_text, set_green_traffic_light, get_models, get_route_distance
+from helpers import is_valid_lane_change, set_green_traffic_light, get_models, get_route_distance
 
 import argparse
-import collections
 import datetime
 import logging
 import math
-import random
 import re
 import weakref
 
@@ -189,58 +175,6 @@ except ImportError:
     import Queue as queue
 
 
-class CarlaSyncMode(object):
-    """
-    Context manager to synchronize output from different sensors. Synchronous
-    mode is enabled as long as we are inside this context
-
-        with CarlaSyncMode(world, sensors) as sync_mode:
-            while True:
-                data = sync_mode.tick(timeout=1.0)
-
-    """
-
-    def __init__(self, world, *sensors, **kwargs):
-        self.world = world
-        self.sensors = sensors
-        self.frame = None
-        self.delta_seconds = 1.0 / kwargs.get('fps', 20)
-        self._queues = []
-        self._settings = None
-
-    def __enter__(self):
-        self._settings = self.world.get_settings()
-        self.frame = self.world.apply_settings(carla.WorldSettings(
-            no_rendering_mode=False,
-            synchronous_mode=True,
-            fixed_delta_seconds=self.delta_seconds))
-
-        def make_queue(register_event):
-            q = queue.Queue()
-            register_event(q.put)
-            self._queues.append(q)
-
-        make_queue(self.world.on_tick)
-        for sensor in self.sensors:
-            make_queue(sensor.listen)
-        return self
-
-    def tick(self, timeout):
-        self.frame = self.world.tick()
-        data = [self._retrieve_data(q, timeout) for q in self._queues]
-        assert all(x.frame == self.frame for x in data)
-        return data
-
-    def __exit__(self, *args, **kwargs):
-        self.world.apply_settings(self._settings)
-
-    def _retrieve_data(self, sensor_queue, timeout):
-        while True:
-            data = sensor_queue.get(timeout=timeout)
-            if data.frame == self.frame:
-                return data
-
-
 # ==============================================================================
 # -- Global functions ----------------------------------------------------------
 # ==============================================================================
@@ -266,7 +200,8 @@ def get_actor_display_name(actor, truncate=250):
 
 
 class World(object):
-    def __init__(self, client: carla.Client, carla_world: carla.World, hud: 'HUD', environment: Environment, history: 'History', actor_filter, settings, hq_recording=False):
+    def __init__(self, client: carla.Client, carla_world: carla.World, hud: 'HUD', environment: Environment,
+                 history: 'History', actor_filter, settings, hq_recording=False):
         self.client = client
         self.world = carla_world
         self.map = self.world.get_map()
@@ -454,9 +389,9 @@ class World(object):
         # Create Autopilot 
         self._client_ap = BasicAgent(self.player, dt=FIXED_DELTA_SECONDS)
         self._client_ap._local_planner._dt = FIXED_DELTA_SECONDS
-        #self._client_ap.set_destination((destination_point.location.x,
-        #                         destination_point.location.y,
-        #                         destination_point.location.z))
+        self._client_ap.set_destination((destination_point.location.x,
+                                         destination_point.location.y,
+                                         destination_point.location.z))
 
         # Set up the sensors.
         self.camera_manager = CameraManager(self.player, self._client_ap, self.hud,
@@ -581,8 +516,9 @@ class KeyboardControl(object):
         self._models = models
         self._drive_model = None
         self._current_model_idx = None
+        self.segmentation_model = None  # type: Optional[SegmentationModel]
 
-        # Settings 
+        # Settings
         self._steering_wheel_enabled = use_steering_wheel
         self._control_type = None
         self._red_lights_allowed = None
@@ -615,8 +551,17 @@ class KeyboardControl(object):
             self._initialize_steering_wheel()
 
     def _initialize_model(self):
-        path, seq_length, sampling_interval = self._models[self._current_model_idx]
-        self._drive_model = LSTMKeras(path, seq_length, sampling_interval)
+        init_tensorflow()
+        path, seq_length, sampling_interval, model_type, segmentation_network = self._models[self._current_model_idx]
+        if model_type == "lstm":
+            self._drive_model = LSTMKeras(path, sampling_interval)
+        else:
+            self._drive_model = CNNKeras(path)
+
+        # Init segmentation model (whose output will be plotted)
+        if segmentation_network is not None:
+            self.segmentation_model = SegmentationModel(segmentation_network)
+
         self._world.hud._drive_model_name = '/'.join(path.split('/')[-2:])
         self._world.hud._drive_model_idx = self._current_model_idx
         self._world.hud._drive_model_num = len(self._models)
@@ -671,7 +616,7 @@ class KeyboardControl(object):
             self._steer_history.pop()
 
     def parse_events(self, client, world: World, clock: pygame.time.Clock):
-        if not self._red_lights_allowed and world._eval_cars[world._eval_cars_idx] == 0:
+        if not self._red_lights_allowed and (not world._eval_mode or world._eval_cars[world._eval_cars_idx] == 0):
             set_green_traffic_light(world.player)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -921,6 +866,10 @@ class KeyboardControl(object):
         elif self._control_type == ControlType.DRIVE_MODEL:
             self._parse_drive_model_commands(world)
 
+        # Plot segmentation output
+        if self.segmentation_model is not None and "forward_center_rgb" in world.history._latest_images.keys():
+            self.segmentation_model.plot_segmentation(world.history._latest_images)
+
         # Client Autopilot Driving 
         elif self._control_type == ControlType.CLIENT_AP:
             # Update HLC to current RoadOption 
@@ -933,8 +882,8 @@ class KeyboardControl(object):
             is_right = is_valid_lane_change(RoadOption.CHANGELANERIGHT, world)
             world.history.update_right_lane_change_valid(is_right)
 
-            # Set target speed to current speed limit - 10 km/h 
-            world._client_ap._local_planner.set_speed(world.player.get_speed_limit() - 10)
+            # Set target speed to current speed limit - 10 km/h, max 60 km/h
+            world._client_ap._local_planner.set_speed(min(60, world.player.get_speed_limit() - 10))
 
             self._parse_client_ap(world)
 
@@ -1189,7 +1138,7 @@ class HUD(object):
         self._info_text += [
             'Number of vehicles: % 8d' % len(vehicles)
         ]
-        if world._eval_mode:
+        if world._eval_mode or True:
             if world._eval_num is not None and world._eval_num_current is not None:
                 self._info_text += ['']
                 self._info_text += ['Eval run: %d/%d' % (world._eval_num_current, world._eval_num)]
@@ -1344,7 +1293,8 @@ class HelpText(object):
 
 
 class CameraManager(object):
-    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', eval=False, hq_recording=False):
+    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', eval=False,
+                 hq_recording=False):
         self.sensor = None
         self._surface = None
         self._parent = parent_actor
@@ -2029,7 +1979,7 @@ def game_loop(args, settings):
     try:
 
         client = carla.Client(args.host, args.port)
-        client.load_world("Town04")
+        client.load_world("Town01")
         sim_world = client.get_world()  # type: carla.World
         map_name = sim_world.get_map().name
         client.set_timeout(15.0)
@@ -2078,7 +2028,8 @@ def game_loop(args, settings):
 
         while True:
             sim_world.tick()
-            clock.tick(int(hud.server_fps_realtime))
+            # clock.tick(int(hud.server_fps_realtime))
+            clock.tick()
             if controller.parse_events(client, world, clock):
                 return
             world.tick(clock)

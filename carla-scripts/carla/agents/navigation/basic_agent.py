@@ -33,9 +33,9 @@ class BasicAgent(Agent):
         self._proximity_threshold = 10.0  # meters
         self._state = AgentState.NAVIGATING
         args_lateral_dict = {
-            'K_P': 0.5,
-            'K_D': 0.02,
-            'K_I': 0,
+            'K_P': 0.75,
+            'K_D': 0.001,
+            'K_I': 1,
             'dt': dt}
         self._local_planner = LocalPlanner(
             self._vehicle, opt_dict={'target_speed' : target_speed,
