@@ -213,7 +213,8 @@ training/psp_checkpoints_best
 segmentation-prediction/dataset
 training/mobilenet_checkpoints
 training/pspnet_checkpoints/
-
+segmentation-prediction/models
+prediction_pipeline/data
 output
 
 

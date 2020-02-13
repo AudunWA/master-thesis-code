@@ -7,13 +7,20 @@
 from keras_segmentation.models.model_utils import transfer_weights
 from keras_segmentation.models.unet import vgg_unet
 from keras_segmentation.pretrained import  pspnet_50_ADE_20K
-from keras_segmentation.models.pspnet import pspnet_101, pspnet_50
+from keras_segmentation.models.pspnet import pspnet_101, pspnet_50, pspnet
 import keras_segmentation.models.all_models as models
+from keras.utils import plot_model
+from keras_segmentation.models.unet import unet_mini
 
+from keras_segmentation.models.mobilenet import get_mobilenet_encoder
 import cv2
 img = cv2.imread("dataset/annotations_prepped_train/a0vGGO5MIsQW1K_-sulhAg.png")
 print(img.max())
-new_model = models.model_from_name["mobilenet_segnet"](n_classes=8)
+
+
+
+new_model = pspnet(8, input_height=192, input_width=192)
+new_model.summary()
 
 #transfer_weights( pretrained_model , new_model  ) # transfer weights from pre-trained model to your model
 
@@ -22,7 +29,7 @@ new_model.train(
     train_annotations = "dataset/annotations_prepped_train/",
     val_images="dataset/images_prepped_val/",
     val_annotations="dataset/annotations_prepped_val/",
-    checkpoints_path = "mobilenet_checkpoints/pspnet_50_eight",
+    checkpoints_path = "fcn_mobilenet_check/fcn_mobilenet_eight_test",
     validate=True,
     do_augment=True,
     epochs=100,

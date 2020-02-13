@@ -1,54 +1,34 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# ## Imports
-
-# In[1]:
+## Imports
 from ast import literal_eval
-
 import sys
-
 from keras_segmentation.data_utils.data_loader import get_image_array
-
-print(sys.version_info)
-
 import os
 import cv2
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import configparser
-import tensorflow as tf
 import time
 import itertools
 from glob import glob
 from pathlib import Path
-# from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-# from tensorflow.keras.models import Model
-# from tensorflow.keras.optimizers import Adam
-# from tensorflow.keras.layers import Input, Flatten, Dense, Cropping2D, Conv2D, concatenate, TimeDistributed, CuDNNLSTM
-# from tensorflow.keras.utils import Sequence
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.layers import Input, Flatten, Dense, Cropping2D, Conv2D, concatenate, TimeDistributed, CuDNNLSTM
 from keras.utils import Sequence, plot_model
-import random
 from keras_segmentation.predict import model_from_checkpoint_path
 from keras_segmentation.models.pspnet import pspnet_50
-from keras_segmentation.pretrained import pspnet_50_ADE_20K
-
 from keras.backend import tf
 
 three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
 seven_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_seven"
 seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
-seven_class_vanilla_psp_path = "/home/audun/master-thesis-code/training/fcn_mobilenet_check/fcn_mobilenet_eight"
+seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-13_15-29-13/pspnet_8_classes"
 
 checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
 
 import tensorflow.keras.backend as K
-import scipy
 
 # import pydotplus
 
@@ -56,13 +36,7 @@ print(tf.__version__)
 print(cv2.__version__)
 print(os.environ["CONDA_DEFAULT_ENV"])
 
-# ## Helper functions
-#
-
-# In[2]:
-
-
-# hlc_one_hot = { 0: [1,0,0], 1:[0,1,0], 2:[0,0,1] }
+## Helper functions
 hlc_one_hot = {1: [1, 0, 0, 0], 2: [0, 1, 0, 0], 3: [0, 0, 1, 0], 4: [0, 0, 0, 1]}
 
 
@@ -147,39 +121,6 @@ def split_dict(dictionary, split_pos):
     return train_dict, val_dict
 
 
-"""
-def adjust_hlcs(hlcs, info_signals):
-    Randomly adjust HLC backwards, 
-    such that the HLC data is given before the car is in the intersection 
-    
-    # Iterate over all episodes 
-    for e in range(len(hlcs)): 
-        active_change_hlc = None
-        changed = 0
-        adjust_num = random.randint(20, 40)
-        # Iterate over all hlcs in episode 
-        for i in range(len(hlcs[e])-2,-1, -1):
-            next_hlc = np.argmax(hlcs[e][i+1]) + 1 
-            current_hlc = np.argmax(hlcs[e][i]) +1 
-            if active_change_hlc == False:
-                active_change_hlc = None
-                continue
-
-            if active_change_hlc is None:
-                if next_hlc == 1 or next_hlc == 2 or next_hlc == 3:                     
-                    if current_hlc == 4: 
-                        active_change_hlc = hlcs[e][i+1]
-            if active_change_hlc is not None: 
-                hlcs[e][i] = active_change_hlc
-                if info_signals[e][i][2] != 0: 
-                    changed += 1
-                if changed == adjust_num:
-                    active_change_hlc = False
-                    changed = 0 
-    return hlcs 
-"""
-
-
 #### BALANCING DATA - Helper functions ####
 def get_hlc_dist_label(hlc):
     " Get distributions of HLC in data "
@@ -240,22 +181,12 @@ def shuffle_data(inputs_flat, targets_flat):
     return inputs_flat, targets_flat
 
 
-# ## Data Augmentations
-# - Lightness
-# - Hue
-# - Gaussian Blur
-# - Shadows
-# - Rain
-
 # ## Load driving logs
 # - Loads data from all csv file in a lits of folders
 # - Stores the data in a input dictionary and a target dictionary
 # - Normalizes and coverts data to correct format
 # - Does not use side cameraes for lane change data
 #
-
-# In[3]:
-
 
 import random
 
@@ -264,7 +195,7 @@ def get_path(episode_path, image_path):
     return str(episode_path / Path("imgs") / image_path.split("/")[-1])
 
 
-def load_driving_logs(dataset_folders, steering_correction):
+def load_driving_logs(dataset_folders):
     """
     input:
         dataset_folders: list of paths to folders to load data from
@@ -279,14 +210,12 @@ def load_driving_logs(dataset_folders, steering_correction):
         inputs: dictionary of all input data (image paths, info signals, HLCs, control signals)
         targets: dictionary of all target data (steer, throttle)
     """
-    img_paths_center = []
-
     inputs = create_input_dict()
 
     targets = create_target_dict()
     # Loads data
     for folder in dataset_folders:
-        folder_path = Path("dataset") / folder
+        folder_path = Path("data/carla_data") / folder
         for episode in glob(str(folder_path / "*")):
 
             temp_forward = {"center": [], "left": [], "right": []}
@@ -330,8 +259,6 @@ def load_driving_logs(dataset_folders, steering_correction):
 
 
 # ## Plot Data
-
-# In[4]:
 
 
 def plot_data(dist, title=""):
@@ -390,8 +317,6 @@ def plot_data(dist, title=""):
 #
 # - Get distribution of HLC, speed, speed limit, and traffic lights
 # - Balance data for LSTM
-
-# In[5]:
 
 STEERING_ANGLE_THRESHOLD = 0.05
 
@@ -499,7 +424,7 @@ def balance_steering_angle(inputs, targets, dist, target_straight_fraction):
     return inputs_bal, targets_bal
 
 
-def balance_data_lstm(inputs, targets, straight_angle_frac=0.2, debug=False, drop=False):
+def balance_data_lstm(inputs, targets, straight_angle_frac=0.2):
     """ Balance dataset for LSTM data """
     print("Balancing data:")
 
@@ -520,61 +445,13 @@ def balance_data_lstm(inputs, targets, straight_angle_frac=0.2, debug=False, dro
     # Shuffle
     inputs_bal, targets_bal = shuffle_data(inputs_bal, targets_bal)
 
-    if drop:
-        inputs_bal, targets_bal = drop_follow_lane(inputs_bal, targets_bal, 3)
-
     dist_bal = get_dist(inputs_bal, targets_bal)
 
     return inputs_bal, targets_bal, dist_bal
 
-
-# ## Drop random data
-# Randomly drop data that is follow lane without brake values or turns
-
-# In[6]:
-
-
-def drop_follow_lane(inputs, targets, keep_every):
-    print("Dropping...")
-
-    inputs_dropped = create_input_dict()
-    targets_dropped = create_target_dict()
-
-    for i in range(len(inputs["forward_imgs"])):
-
-        follow_lane = True
-        # Iterate over all HLC in sequence
-        for hlc in inputs["hlcs"][i]:
-            hlc_value = np.argmax(hlc) + 1
-            # Only mark sequence as follow lane if all hlcs are follow lane
-            if hlc_value != 4:
-                follow_lane = False
-                break
-
-        steer = targets["steer"][i]
-
-        # Only drop if FOLLOW_LANE, no brake, and no turn
-        if follow_lane and abs(steer) < 0.1:
-            # Drop based on drop_rate
-
-            if np.random.randint(keep_every) != 0:
-                continue
-
-        # Keep
-        for key in inputs_dropped:
-            inputs_dropped[key].append(inputs[key][i])
-        for key in targets_dropped:
-            targets_dropped[key].append(targets[key][i])
-
-    return inputs_dropped, targets_dropped
-
-
 # # LSTM
 
 # ## Prepare dataset format
-
-# In[7]:
-
 
 def get_episode_sequences(data, sampling_interval, seq_length):
     sequences = []
@@ -610,15 +487,13 @@ def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
 
 # ## Define model
 
-# In[8]:
-
 def get_layer_with_name(model, name):
     for layer in model.layers:
         if layer.name == name:
             return layer
 
-def get_segmentation_model(model_type, freeze=True):
 
+def get_segmentation_model(model_type, freeze=True):
     x = None
     segmentation_model = None
     if model_type == "three_class_trained":
@@ -630,9 +505,8 @@ def get_segmentation_model(model_type, freeze=True):
 
 
     elif model_type == "pretrained":
-        segmentation_model = pspnet_50_ADE_20K()
-        print(segmentation_model.summary())
-        x = get_layer_with_name(segmentation_model, "activation_53").output
+        segmentation_model = pspnet_50()
+        x = segmentation_model.layers[-4].output
 
     elif model_type == "seven_class_vanilla_psp":
         segmentation_model = model_from_checkpoint_path(seven_class_vanilla_psp_path)
@@ -649,8 +523,6 @@ def get_segmentation_model(model_type, freeze=True):
     model_new = Model(inputs=segmentation_model.layers[0].input,
                       outputs=x)
 
-    print(model_new.summary())
-
     if freeze:
         for layer in model_new.layers:
             layer.trainable = False
@@ -658,24 +530,14 @@ def get_segmentation_model(model_type, freeze=True):
     return model_new
 
 
-def get_lstm_model(seq_length, sine_steering=False, print_summary=True):
+def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_vanilla_psp", print_summary=True):
     forward_image_input = Input(shape=(seq_length, 224, 224, 3), name="forward_image_input")
     hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
 
-    segmentation_model = get_segmentation_model("pretrained", freeze=False)
+    segmentation_model = get_segmentation_model(segm_model)
     segmentation_model.summary()
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
 
-    # x = TimeDistributed(Cropping2D(cropping=((50,0),(0,0))))(forward_image_input)
-    # x = TimeDistributed(Conv2D(24,(5,5),strides=(2,2), activation="relu"))(x)
-    # x = TimeDistributed(Conv2D(36,(5,5),strides=(2,2), activation="relu"))(x)
-    # x = TimeDistributed(Conv2D(48,(5,5),strides=(2,2), activation="relu"))(x)
-    # x = TimeDistributed(Conv2D(64,(3,3),strides=(2,2), activation="relu"))(x)
-    # x = TimeDistributed(Conv2D(64,(3,3), activation="relu"))(x)
-    # x = TimeDistributed(Conv2D(64,(3,3), activation="relu"))(x)
-    # conv_output = TimeDistributed(Flatten())(x)
-
-    # x = concatenate([conv_output, hlc_input])
     x = concatenate([segmentation_output, hlc_input])
 
     x = TimeDistributed(Dense(100, activation="relu"))(x)
@@ -690,21 +552,13 @@ def get_lstm_model(seq_length, sine_steering=False, print_summary=True):
 
     if print_summary:
         model.summary()
-    plot_model(model, to_file='model.png')
 
     return model
-
-
-# mol = get_lstm_model(10)
-# get_segmentation_model()
 
 
 # # Training
 
 # ## Define generator
-
-# In[9]:
-
 
 class generator(Sequence):
     def __init__(self, inputs, targets, batch_size, validation=False, sine_steering=False):
@@ -741,7 +595,6 @@ class generator(Sequence):
                 forward_imgs.append(
                     [get_image_array(image, 224, 224, imgNorm="sub_mean", ordering='channels_last') for image in seq])
 
-        # forward_imgs = np.array(forward_imgs)/255.0 - 0.5
         return {
                    "forward_image_input": np.array(forward_imgs),
                    "hlc_input": self.inputs["hlcs"][subset]
@@ -751,31 +604,15 @@ class generator(Sequence):
                }
 
 
-# ## Parameters
-
-# In[10]:
+## Parameters
 
 
 val_split = 0.8
 adjust_hlc = False
 
 epochs_list = [100]
-# dataset_folders_lists = [["Town01", "Town04"]]
+
 dataset_folders_lists = [["Town01_simple_noise", "Town01_simple_roaming_noise"]]
-"""dataset_folders_lists = [([
-    "etron/Town01/ClientAP/no_cars_no_rain",
-    "etron/Town01/ClientAP/no_cars_no_rain_noise15",
-    "etron/Town01/ClientAP/no_cars_rain_noise10",
-    "etron/Town01/ClientAP/cars_no_rain_noise15",
-    "etron/Town01/ClientAP/cars_rain_noise10",    
-], [
-    "etron/Town04/ClientAP/no_cars_no_rain", 
-    "etron/Town04/ClientAP/no_cars_rain_noise5", 
-    "etron/Town04/ClientAP/cars_no_rain_noise5", 
-    "etron/Town04/ClientAP/cars_rain_noise5", 
-    "etron/Town01/ClientAP/brake_all_weather_noise15",
-    "etron/Town01/ClientAP/brake_all_weather",
-])]"""
 
 steering_corrections = [0.05]
 
@@ -789,11 +626,8 @@ sine_steering_list = [True]
 
 balance_data_list = [True, False]
 
+
 # ## Training loop
-
-# In[ ]:
-
-
 parameter_permutations = itertools.product(epochs_list,
                                            dataset_folders_lists,
                                            steering_corrections,
@@ -805,8 +639,7 @@ parameter_permutations = itertools.product(epochs_list,
 
 # Train a new model for each parameter permutation, and save the best models
 model_name = input("Name of model test: ").strip()
-# balance_data = True if input("Balance data y/[n]: ").lower() == "y" else False
-# drop_data = True if input("Drop data y/[n]: ").lower() == "y" else False
+segmentation_model_name = "seven_class_vanilla_psp"
 
 parameter_permutations_list = [p for p in parameter_permutations]
 
@@ -815,14 +648,14 @@ for parameters in parameter_permutations_list:
     epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data = parameters
     parameters_string = (
         "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\n\n"
-        .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
-                sampling_interval, seq_length))
+            .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
+                    sampling_interval, seq_length))
 
     # town1_dataset_folders, town4_dataset_folders = dataset_folders
 
     # Prepare for logging
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
-    path = Path('models') / model_name / timestamp
+    path = Path('data/driving_models') / model_name / timestamp
     if not os.path.exists(str(path)):
         os.makedirs(str(path))
 
@@ -838,7 +671,7 @@ for parameters in parameter_permutations_list:
         config.write(configfile)
 
     # Load drive logs and paths
-    inputs, targets = load_driving_logs(dataset_folders, steering_correction)
+    inputs, targets = load_driving_logs(dataset_folders)
     inputs_flat, targets_flat = prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length)
 
     # Balance data
@@ -883,13 +716,13 @@ for parameters in parameter_permutations_list:
     print("Validation set size: " + str(val_num))
 
     # Get model
-    model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering)
+    model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering, segm_model=segmentation_model_name)
 
     # Compile model
     model.compile(loss=[steer_loss(), mean_squared_error], optimizer=Adam())
     checkpoint_val = ModelCheckpoint(
         str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}.h5')), monitor='val_loss',
-        verbose=1, save_best_only=False, mode="min")
+        verbose=1, save_best_only=True, mode="min")
 
     # Create image of model architecture
     # plot_model(model, str(path/'model.png'))
@@ -901,7 +734,6 @@ for parameters in parameter_permutations_list:
     es = EarlyStopping(monitor='val_steer_pred_loss', mode='min', verbose=1, patience=8)
 
     # Train model
-    print(model.summary())
     history_object = model.fit_generator(
         generator(inputs_train, targets_train, batch_size, sine_steering=sine_steering),
         validation_data=generator(inputs_val, targets_val, batch_size, validation=True, sine_steering=sine_steering),
@@ -910,15 +742,14 @@ for parameters in parameter_permutations_list:
         callbacks=[checkpoint_val, es],
         steps_per_epoch=steps,
         validation_steps=steps_val,
-        use_multiprocessing=False,
-        workers=1
+        use_multiprocessing=True,
+        workers=10
     )
 
     # Prepare plot and save it to disk
     fig = plt.figure()
     ax = fig.add_subplot(111)
 
-    print("History", history_object.history)
     ax.plot(history_object.history['steer_pred_loss'], color="blue")
     ax.plot(history_object.history['val_steer_pred_loss'], color="blue", linestyle="--")
     ax.plot(history_object.history['throttle_pred_loss'], color="green")
@@ -936,8 +767,3 @@ for parameters in parameter_permutations_list:
     plt.show()
     fig.savefig(str(path / 'loss.png'), bbox_extra_artists=(lgd,), bbox_inches='tight')
     print('\n\n\n\n')
-
-# In[ ]:
-
-
-# In[ ]:
