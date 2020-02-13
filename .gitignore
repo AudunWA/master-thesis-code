@@ -217,5 +217,6 @@ segmentation-prediction/models
 prediction_pipeline/data
 output
 
-
-
+carla-scripts/hege-max/models_not_to_eval
+carla-scripts/hege-max/models_to_eval
+carla-scripts/hege-max/seg_nets
