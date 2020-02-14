@@ -35,11 +35,11 @@ class SegmentationModel:
         checkpoints_path = "seg_nets/" + model_path
         self.model = model_from_checkpoint_path(checkpoints_path)
         self.im = None
+        self.model.summary()
 
     def plot_segmentation(self, images):
         prediction = self.model.predict_segmentation(images["forward_center_rgb"]).astype('float32')
         (width, height, _) = images["forward_center_rgb"].shape
-
         prediction = cv2.resize(prediction, dsize=(height, width), interpolation=cv2.INTER_NEAREST)
         if self.im is None:
             self.im = plt.imshow(prediction)
@@ -117,10 +117,12 @@ class LSTMKeras(ModelInterface):
         """img_left = cv2.cvtColor(images["left_center_rgb"], cv2.COLOR_BGR2LAB)
         img_right = cv2.cvtColor(images["right_center_rgb"], cv2.COLOR_BGR2LAB)"""
         info_input = [
-            max(float(info["speed"] * 3.6 / 100), 0.2),
-            float(info["speed_limit"] * 3.6 / 100),
+            float(info["speed"] * 3.6 / 30 - 1),
+            float(info["speed_limit"] * 3.6 / 30 - 1),
             info["traffic_light"]
         ]
+        print("Traffic light", info_input[2])
+
         hlc_input = self.hlc_one_hot[info["hlc"].value]
         environment_input = self.environment_one_hot[info["environment"].value]
 
@@ -155,10 +157,15 @@ class LSTMKeras(ModelInterface):
                 "environment_input": environments
             })
 
-            steer, throttle, brake = prediction[0][0], prediction[1][0][0], 0
+            steer, throttle = prediction[0][0], prediction[1][0][0]
+            if len(prediction) == 3:
+                brake = prediction[2][0][0]
+            else:
+                brake = 0
+
             self.brake_hist.append(brake)
             avg_brake = np.max(self.brake_hist)
-            step_brake = 1 if avg_brake > 0.5 else 0
+            step_brake = avg_brake  # 1 if avg_brake > 0.5 else 0
 
             if len(self.brake_hist) > 7:
                 self.brake_hist.pop(0)
@@ -167,11 +174,11 @@ class LSTMKeras(ModelInterface):
                 steer_curve_parameters = curve_fit(encoder, np.arange(1, 11, 1), steer)[0]
                 steer_angle = steer_curve_parameters[0]
                 self._last_pred = (steer_angle, throttle, step_brake)
-                print("Steer (sine): ", steer_angle, ", throttle: ", throttle)
+                print("Steer (sine): ", steer_angle, ", throttle: ", throttle, ", brake: ", brake)
             else:
                 steer = steer[0]
                 self._last_pred = (steer, throttle, step_brake)
-                print("Steer: ", steer, ", throttle: ", throttle)
+                print("Steer: ", steer, ", throttle: ", throttle, ", brake: ", brake)
 
             return self._last_pred
 

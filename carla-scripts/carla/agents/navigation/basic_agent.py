@@ -94,6 +94,7 @@ class BasicAgent(Agent):
         # and other vehicles
         actor_list = self._world.get_actors()
         vehicle_list = actor_list.filter("*vehicle*")
+        pedestrians_list = actor_list.filter("*walker.pedestrian*")
         lights_list = actor_list.filter("*traffic_light*")
 
         # check possible obstacles
@@ -101,6 +102,14 @@ class BasicAgent(Agent):
         if vehicle_state:
             if debug:
                 print('!!! VEHICLE BLOCKING AHEAD [{}])'.format(vehicle.id))
+
+            self._state = AgentState.BLOCKED_BY_VEHICLE
+            hazard_detected = True
+
+        pedestrian_state, pedestrian = self._is_pedestrian_hazard(pedestrians_list)
+        if pedestrian_state:
+            if debug:
+                print('!!! PEDESTRIAN BLOCKING AHEAD [{}])'.format(pedestrian.id))
 
             self._state = AgentState.BLOCKED_BY_VEHICLE
             hazard_detected = True
