@@ -214,7 +214,8 @@ segmentation-prediction/dataset
 segmentation-prediction/models
 training/mobilenet_checkpoints
 training/pspnet_checkpoints/
-
+segmentation-prediction/models
+prediction_pipeline/data
 output
 
 carla-scripts/hege-max/models_not_to_eval
