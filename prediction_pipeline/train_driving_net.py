@@ -24,7 +24,7 @@ from keras.backend import tf
 three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
 seven_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_seven"
 seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
-seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-13_15-29-13/pspnet_8_classes"
+seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
 
 checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
 
@@ -98,14 +98,18 @@ def sine_encode(angle):
 def create_input_dict():
     return {
         "forward_imgs": [],
-        "hlcs": [],
+        "info_signals": [],
+        "hlcs" : [],
     }
+
+
 
 
 def create_target_dict():
     return {
         "steer": [],
         "throttle": [],
+        "brake": [],
     }
 
 
@@ -220,9 +224,11 @@ def load_driving_logs(dataset_folders):
 
             temp_forward = {"center": [], "left": [], "right": []}
             temp_hlcs = {"center": [], "left": [], "right": []}
+            temp_info_signals = {"center": [], "left": [], "right": []}
 
             temp_steer = {"center": [], "left": [], "right": []}
             temp_throttle = {"center": [], "left": [], "right": []}
+            temp_brake = {"center": [], "left": [], "right": []}
 
             episode_path = Path(episode)
 
@@ -232,8 +238,11 @@ def load_driving_logs(dataset_folders):
                     continue
 
                 [throttle, steer, brake] = literal_eval(row["ClientAutopilotControls"])
-                # steer = row["angle"]
-                # throttle = row["speed"]
+
+                # Normalize max speed (60km/h) between -1 and 1
+                speed = float(row["Velocity"]) * 3.6 / 30 - 1
+                speed_limit = float(row["SpeedLimit"]) * 3.6 / 30 - 1
+                traffic_light = int(row["TrafficLight"])
 
                 hlc = row["HLC"]
                 if hlc == 0 or hlc == -1:
@@ -243,15 +252,18 @@ def load_driving_logs(dataset_folders):
                 temp_forward["center"].append(get_path(episode_path, row["ForwardCenter"]))
                 temp_steer["center"].append(steer)
                 temp_throttle["center"].append(throttle)
+                temp_brake["center"].append(brake)
                 temp_hlcs["center"].append(hlc)
+                temp_info_signals["center"].append([speed, speed_limit, traffic_light])
+
 
             inputs["forward_imgs"].append(temp_forward["center"])
-
             inputs["hlcs"].append(temp_hlcs["center"])
+            inputs["info_signals"].append(temp_info_signals["center"])
 
             targets["steer"].append(temp_steer["center"])
-
             targets["throttle"].append(temp_throttle["center"])
+            targets["brake"].append(temp_brake["center"])
 
     print("Done, {:d} episode(s) loaded.".format(len(inputs["forward_imgs"])))
 
@@ -474,10 +486,14 @@ def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
          get_episode_sequences(inputs["forward_imgs"][e], sampling_interval, seq_length)]
         [inputs_flat["hlcs"].append(sequence) for sequence in
          get_episode_sequences(inputs["hlcs"][e], sampling_interval, seq_length)]
+        [inputs_flat["info_signals"].append(sequence) for sequence in
+         get_episode_sequences(inputs["info_signals"][e], sampling_interval, seq_length)]
         [targets_flat["steer"].append(sequence[-1]) for sequence in
          get_episode_sequences(targets["steer"][e], sampling_interval, seq_length)]
         [targets_flat["throttle"].append(sequence[-1]) for sequence in
          get_episode_sequences(targets["throttle"][e], sampling_interval, seq_length)]
+        [targets_flat["brake"].append(sequence[-1]) for sequence in
+         get_episode_sequences(targets["brake"][e], sampling_interval, seq_length)]
 
     # Shuffle
     inputs_flat, targets_flat = shuffle_data(inputs_flat, targets_flat)
@@ -529,16 +545,16 @@ def get_segmentation_model(model_type, freeze=True):
 
     return model_new
 
-
 def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_vanilla_psp", print_summary=True):
     forward_image_input = Input(shape=(seq_length, 224, 224, 3), name="forward_image_input")
     hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
+    info_input = Input(shape=(seq_length, 3), name="info_input")
 
     segmentation_model = get_segmentation_model(segm_model)
     segmentation_model.summary()
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
 
-    x = concatenate([segmentation_output, hlc_input])
+    x = concatenate([segmentation_output, hlc_input, info_input])
 
     x = TimeDistributed(Dense(100, activation="relu"))(x)
 
@@ -546,8 +562,9 @@ def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_vani
     steer_dim = 1 if not sine_steering else 10
     steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(x)
 
-    throtte_pred = Dense(1, name="throttle_pred")(x)
-    model = Model(inputs=[forward_image_input, hlc_input], outputs=[steer_pred, throtte_pred])
+    throtte_pred = Dense(1, name="throttle_pred", activation="sigmoid")(x)
+    brake_pred = Dense(1, name="brake_pred", activation="sigmoid")(x)
+    model = Model(inputs=[forward_image_input, hlc_input, info_input], outputs=[steer_pred, throtte_pred, brake_pred])
     model.summary()
 
     if print_summary:
@@ -597,10 +614,12 @@ class generator(Sequence):
 
         return {
                    "forward_image_input": np.array(forward_imgs),
-                   "hlc_input": self.inputs["hlcs"][subset]
+                   "hlc_input": self.inputs["hlcs"][subset],
+                   "info_input": self.inputs["info_signals"][subset],
                }, {
                    "steer_pred": steer_pred,
                    "throttle_pred": self.targets["throttle"][subset],
+                   "brake_pred": self.targets["brake"][subset],
                }
 
 
@@ -612,19 +631,19 @@ adjust_hlc = False
 
 epochs_list = [100]
 
-dataset_folders_lists = [["Town01_simple_noise", "Town01_simple_roaming_noise"]]
+dataset_folders_lists = [["Town01_all_actors_noise", "Town01_simple_noise", "Town01_simple_roaming_noise"], ["Town01_all_actors_noise"]]
 
 steering_corrections = [0.05]
 
 batch_sizes = [64]
 
-sampling_intervals = [2, 3]
+sampling_intervals = [3]
 
-seq_lengths = [1, 2]
+seq_lengths = [1,3]
 
-sine_steering_list = [True]
+sine_steering_list = [True, False]
 
-balance_data_list = [True, False]
+balance_data_list = [True]
 
 
 # ## Training loop
@@ -719,9 +738,9 @@ for parameters in parameter_permutations_list:
     model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering, segm_model=segmentation_model_name)
 
     # Compile model
-    model.compile(loss=[steer_loss(), mean_squared_error], optimizer=Adam())
+    model.compile(loss=[steer_loss(), mean_squared_error, mean_squared_error], optimizer=Adam())
     checkpoint_val = ModelCheckpoint(
-        str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}.h5')), monitor='val_loss',
+        str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}_b{val_brake_pred_loss:.4f}.h5')), monitor='val_loss',
         verbose=1, save_best_only=True, mode="min")
 
     # Create image of model architecture
@@ -754,15 +773,19 @@ for parameters in parameter_permutations_list:
     ax.plot(history_object.history['val_steer_pred_loss'], color="blue", linestyle="--")
     ax.plot(history_object.history['throttle_pred_loss'], color="green")
     ax.plot(history_object.history['val_throttle_pred_loss'], color="green", linestyle="--")
+    ax.plot(history_object.history['brake_pred_loss'], color="green")
+    ax.plot(history_object.history['val_brake_pred_loss'], color="green", linestyle="--")
 
-    ax.set_title("Mean squared loss of: throttle and steer")
+    ax.set_title("Mean squared loss of: throttle, brake, and steer")
     ax.set_xlabel("epochs")
     ax.set_ylabel("mse")
 
     lgd = ax.legend(['steer loss',
                      'steer validation loss',
                      'throttle loss',
-                     'throttle validation loss'], bbox_to_anchor=(1.1, 1.05))
+                     'throttle validation loss'
+                     'brake loss',
+                     'brake validation loss'], bbox_to_anchor=(1.1, 1.05))
 
     plt.show()
     fig.savefig(str(path / 'loss.png'), bbox_extra_artists=(lgd,), bbox_inches='tight')

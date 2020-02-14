@@ -1,8 +1,10 @@
 import os
 import random
+import cv2
 from keras_segmentation.predict import model_from_checkpoint_path
 from pathlib import Path
 from prediction_pipeline.utils.helpers import verify_folder_exists
+import numpy as np
 random.seed(1)
 
 data_folder = Path("data/segmentation_test_images")
@@ -18,12 +20,14 @@ def segment_images(path_to_checkpoint, folder_name):
         in_name = str(data_folder / folder_name / filename)
         out_name = str(output_folder / filename.replace("jpg", "png"))
 
-        checkpoint.predict_segmentation(
+        res = checkpoint.predict_segmentation(
             inp=in_name,
             out_fname=out_name
         )
+        print("Res",np.unique(res))
 
 
-checkpoint_path = "data/segmentation_models/pspnet_8_classes/2020-02-13_15-29-13/pspnet_8_classes"
+checkpoint_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
 
-segment_images(checkpoint_path, "glos_cycle")
+segment_images(checkpoint_path, "mapillary")
+

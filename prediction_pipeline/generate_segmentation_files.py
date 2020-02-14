@@ -92,7 +92,7 @@ def convert_segmentation_images(input_path, output_path):
         #  If pixel.color in lane marking colors: set pixel to (1,0,0)
         #  Else: set pixel to (2,0,0)
 
-        for j, class_colors in enumerate(three_classes):
+        for j, class_colors in enumerate(eight_classes):
             for color in class_colors:
                 mask = (img == color[::-1]).all(axis=2)
                 output_img[mask] = [j+1, 0, 0]
