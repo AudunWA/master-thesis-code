@@ -36,7 +36,7 @@ class Agent(object):
         :param vehicle: actor to apply to local planner logic onto
         """
         self._vehicle = vehicle
-        self._proximity_threshold = 15.0  # meters
+        self._proximity_threshold = 10.0  # meters
         self._local_planner = None
         self._world = self._vehicle.get_world()
         self._map = self._vehicle.get_world().get_map()
@@ -186,45 +186,6 @@ class Agent(object):
             if is_within_distance_ahead(target_vehicle.get_transform(),
                                         self._vehicle.get_transform(),
                                         self._proximity_threshold):
-                return (True, target_vehicle)
-
-        return (False, None)
-
-    def _is_pedestrian_hazard(self, vehicle_list):
-        """
-        Check if a given vehicle is an obstacle in our way. To this end we take
-        into account the road and lane the target vehicle is on and run a
-        geometry test to check if the target vehicle is under a certain distance
-        in front of our ego vehicle.
-
-        WARNING: This method is an approximation that could fail for very large
-         vehicles, which center is actually on a different lane but their
-         extension falls within the ego vehicle lane.
-
-        :param vehicle_list: list of potential obstacle to check
-        :return: a tuple given by (bool_flag, vehicle), where
-                 - bool_flag is True if there is a vehicle ahead blocking us
-                   and False otherwise
-                 - vehicle is the blocker object itself
-        """
-
-        ego_vehicle_location = self._vehicle.get_location()
-        ego_vehicle_waypoint = self._map.get_waypoint(ego_vehicle_location)
-
-        for target_vehicle in vehicle_list:
-            # do not account for the ego vehicle
-            if target_vehicle.id == self._vehicle.id:
-                continue
-
-            # if the object is not in our lane it's not an obstacle
-            target_vehicle_waypoint = self._map.get_waypoint(target_vehicle.get_location())
-            if target_vehicle_waypoint.road_id != ego_vehicle_waypoint.road_id or \
-                    target_vehicle_waypoint.lane_id != ego_vehicle_waypoint.lane_id:
-                continue
-
-            if is_within_distance_ahead(target_vehicle.get_transform(),
-                                        self._vehicle.get_transform(),
-                                        self._proximity_threshold, 18.0):
                 return (True, target_vehicle)
 
         return (False, None)

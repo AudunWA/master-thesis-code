@@ -108,9 +108,9 @@ class LocalPlanner(object):
             'K_I': 1.4,
             'dt': self._dt}
         args_longitudinal_dict = {
-            'K_P': 0.1,
-            'K_D': 0.0,
-            'K_I': 2,
+            'K_P': 1.0,
+            'K_D': 0,
+            'K_I': 1,
             'dt': self._dt}
 
         # parameters overload
@@ -126,10 +126,6 @@ class LocalPlanner(object):
                 args_lateral_dict = opt_dict['lateral_control_dict']
             if 'longitudinal_control_dict' in opt_dict:
                 args_longitudinal_dict = opt_dict['longitudinal_control_dict']
-
-        # Set correct dt
-        args_lateral_dict['dt'] = self._dt
-        args_longitudinal_dict['dt'] = self._dt
 
         self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
         self._vehicle_controller = VehiclePIDController(self._vehicle,
@@ -153,8 +149,6 @@ class LocalPlanner(object):
         :return:
         """
         self._target_speed = speed
-        self._sampling_radius = self._target_speed * 1 / 3.6  # 1 seconds horizon
-        self._min_distance = self._sampling_radius * self.MIN_DISTANCE_PERCENTAGE
 
     def _compute_next_waypoints(self, k=1):
         """

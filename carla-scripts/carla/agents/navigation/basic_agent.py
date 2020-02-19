@@ -23,7 +23,7 @@ class BasicAgent(Agent):
     target destination. This agent respects traffic lights and other vehicles.
     """
 
-    def __init__(self, vehicle, target_speed=20, dt=1.0/20.0):
+    def __init__(self, vehicle, target_speed=20):
         """
 
         :param vehicle: actor to apply to local planner logic onto
@@ -33,10 +33,10 @@ class BasicAgent(Agent):
         self._proximity_threshold = 10.0  # meters
         self._state = AgentState.NAVIGATING
         args_lateral_dict = {
-            'K_P': 0.75,
-            'K_D': 0.001,
-            'K_I': 1,
-            'dt': dt}
+            'K_P': 1,
+            'K_D': 0.02,
+            'K_I': 0,
+            'dt': 1.0/20.0}
         self._local_planner = LocalPlanner(
             self._vehicle, opt_dict={'target_speed' : target_speed,
             'lateral_control_dict':args_lateral_dict})
@@ -94,7 +94,6 @@ class BasicAgent(Agent):
         # and other vehicles
         actor_list = self._world.get_actors()
         vehicle_list = actor_list.filter("*vehicle*")
-        pedestrians_list = actor_list.filter("*walker.pedestrian*")
         lights_list = actor_list.filter("*traffic_light*")
 
         # check possible obstacles
@@ -102,14 +101,6 @@ class BasicAgent(Agent):
         if vehicle_state:
             if debug:
                 print('!!! VEHICLE BLOCKING AHEAD [{}])'.format(vehicle.id))
-
-            self._state = AgentState.BLOCKED_BY_VEHICLE
-            hazard_detected = True
-
-        pedestrian_state, pedestrian = self._is_pedestrian_hazard(pedestrians_list)
-        if pedestrian_state:
-            if debug:
-                print('!!! PEDESTRIAN BLOCKING AHEAD [{}])'.format(pedestrian.id))
 
             self._state = AgentState.BLOCKED_BY_VEHICLE
             hazard_detected = True

@@ -42,7 +42,7 @@ def get_speed(vehicle):
     return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
 
 
-def is_within_distance_ahead(target_transform, current_transform, max_distance, max_degrees = 90.0):
+def is_within_distance_ahead(target_transform, current_transform, max_distance):
     """
     Check if a target object is within a certain distance in front of a reference object.
 
@@ -66,7 +66,7 @@ def is_within_distance_ahead(target_transform, current_transform, max_distance, 
     forward_vector = np.array([fwd.x, fwd.y])
     d_angle = math.degrees(math.acos(np.clip(np.dot(forward_vector, target_vector) / norm_target, -1., 1.)))
 
-    return d_angle < max_degrees
+    return d_angle < 90.0
 
 
 def compute_magnitude_angle(target_location, current_location, orientation):
