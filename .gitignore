@@ -31,7 +31,7 @@
 # .idea/artifacts
 # .idea/compiler.xml
 # .idea/jarRepositories.xml
-# .idea/modules.xml
+#.idea/modules.xml
 # .idea/*.iml
 # .idea/modules
 # *.iml
@@ -214,10 +214,11 @@ segmentation-prediction/dataset
 segmentation-prediction/models
 training/mobilenet_checkpoints
 training/pspnet_checkpoints/
-segmentation-prediction/models
+segmentation-prediction
 prediction_pipeline/data
 output
 
 carla-scripts/hege-max/models_not_to_eval
 carla-scripts/hege-max/models_to_eval
 carla-scripts/hege-max/seg_nets
+EvalResults
