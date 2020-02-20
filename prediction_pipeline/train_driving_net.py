@@ -1,6 +1,9 @@
 ## Imports
 from ast import literal_eval
+from typing import Tuple
+
 import sys
+from keras.engine.saving import load_model
 from keras_segmentation.data_utils.data_loader import get_image_array
 import os
 import cv2
@@ -631,7 +634,7 @@ adjust_hlc = False
 
 epochs_list = [100]
 
-dataset_folders_lists = [["Town01_all_actors_noise", "Town01_simple_noise", "Town01_simple_roaming_noise"], ["Town01_all_actors_noise"]]
+dataset_folders_lists = [["Town01_new_traffic_light_logic", "Town01_simple_noise", "Town01_simple_roaming_noise"]]
 
 steering_corrections = [0.05]
 
@@ -639,7 +642,7 @@ batch_sizes = [64]
 
 sampling_intervals = [3]
 
-seq_lengths = [1,3]
+seq_lengths = [5]
 
 sine_steering_list = [True, False]
 
@@ -662,15 +665,18 @@ segmentation_model_name = "seven_class_vanilla_psp"
 
 parameter_permutations_list = [p for p in parameter_permutations]
 
-for parameters in parameter_permutations_list:
-    # Get parameters
-    epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data = parameters
-    parameters_string = (
-        "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\n\n"
-            .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
-                    sampling_interval, seq_length))
 
-    # town1_dataset_folders, town4_dataset_folders = dataset_folders
+def build_or_load_model(model_name: str, seq_length: int, sine_steering: bool, segmentation_model_name: str) -> Tuple[Model, str, configparser.ConfigParser]:
+    model_candidates = glob("data/driving_models/" + model_name + "/*").sort(reverse=True)
+
+    if len(model_candidates) > 0:
+        choice = input("Found existing model(s) with same name. Do you want to continue the last session of " + model_name + "? (Y/n)").strip()
+        if choice.lower() == '' or choice.lower() == 'y':
+            model_path = model_candidates[0]
+            model_folder = os.path.dirname(model_candidates[0])
+            config = configparser.ConfigParser()
+            config.read(Path(model_folder) / "config.ini")
+            return load_model(model_path, compile=True), model_folder, config
 
     # Prepare for logging
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
@@ -683,11 +689,37 @@ for parameters in parameter_permutations_list:
         text_file.write(parameters_string)
 
     # Save config file to disk
-    model_name = "lstm"
+    model_type = "lstm"
     config = configparser.ConfigParser()
-    config["ModelConfig"] = {'Model': model_name, 'sequence_length': seq_length, 'sampling_interval': sampling_interval}
+    config["ModelConfig"] = {'Model': model_type, 'sequence_length': seq_length, 'sampling_interval': sampling_interval}
     with open(str(path / 'config.ini'), 'w') as configfile:
         config.write(configfile)
+
+    # Build model
+    model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering, segm_model=segmentation_model_name)
+
+    # Compile model
+    model.compile(loss=[steer_loss(), mean_squared_error, mean_squared_error], optimizer=Adam())
+    return model, path, config
+
+for parameters in parameter_permutations_list:
+    # Get parameters
+    epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data = parameters
+    parameters_string = (
+        "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\n\n"
+            .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
+                    sampling_interval, seq_length))
+
+    # town1_dataset_folders, town4_dataset_folders = dataset_folders
+
+    # Get model
+    model, path, config = build_or_load_model(model_name, seq_length, sine_steering, segmentation_model_name)
+    seq_length = config["seq_length"]
+    sine_steering = config["sine_steering"]
+    segmentation_model_name = config.get("segmentation_model_name", segmentation_model_name)
+    checkpoint_val = ModelCheckpoint(
+        str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}_b{val_brake_pred_loss:.4f}.h5')), monitor='val_loss',
+        verbose=1, save_best_only=True, mode="min")
 
     # Load drive logs and paths
     inputs, targets = load_driving_logs(dataset_folders)
@@ -733,15 +765,6 @@ for parameters in parameter_permutations_list:
     print("---")
     print("Training set size: " + str(train_num))
     print("Validation set size: " + str(val_num))
-
-    # Get model
-    model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering, segm_model=segmentation_model_name)
-
-    # Compile model
-    model.compile(loss=[steer_loss(), mean_squared_error, mean_squared_error], optimizer=Adam())
-    checkpoint_val = ModelCheckpoint(
-        str(path / ('{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}_b{val_brake_pred_loss:.4f}.h5')), monitor='val_loss',
-        verbose=1, save_best_only=True, mode="min")
 
     # Create image of model architecture
     # plot_model(model, str(path/'model.png'))

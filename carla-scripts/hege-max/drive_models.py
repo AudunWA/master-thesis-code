@@ -165,7 +165,8 @@ class LSTMKeras(ModelInterface):
 
             self.brake_hist.append(brake)
             avg_brake = np.max(self.brake_hist)
-            step_brake = avg_brake  # 1 if avg_brake > 0.5 else 0
+            step_brake = 1 if avg_brake > 0.3 else 0
+            #step_brake = brake  # avg_brake  # 1 if avg_brake > 0.5 else 0
 
             if len(self.brake_hist) > 7:
                 self.brake_hist.pop(0)

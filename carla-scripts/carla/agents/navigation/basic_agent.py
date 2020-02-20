@@ -9,13 +9,17 @@
 """ This module implements an agent that roams around a track following random
 waypoints and avoiding other vehicles.
 The agent also responds to traffic lights. """
-
+from typing import List
 
 import carla
+from carla.libcarla import ActorList, Actor
+
 from agents.navigation.agent import Agent, AgentState
 from agents.navigation.local_planner import LocalPlanner
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
+from agents.tools.misc import get_nearest_traffic_light, get_speed
+
 
 class BasicAgent(Agent):
     """
@@ -30,21 +34,24 @@ class BasicAgent(Agent):
         """
         super(BasicAgent, self).__init__(vehicle)
 
+        self.stopping_for_traffic_light = False
         self._proximity_threshold = 10.0  # meters
         self._state = AgentState.NAVIGATING
         args_lateral_dict = {
-            'K_P': 1,
-            'K_D': 0.02,
-            'K_I': 0,
-            'dt': 1.0/20.0}
+            'K_P': 0.75,
+            'K_D': 0.001,
+            'K_I': 1,
+            'dt': 1.0 / 20.0}
         self._local_planner = LocalPlanner(
-            self._vehicle, opt_dict={'target_speed' : target_speed,
-            'lateral_control_dict':args_lateral_dict})
+            self._vehicle, opt_dict={'target_speed': target_speed,
+                                     'lateral_control_dict': args_lateral_dict})
         self._hop_resolution = 2.0
         self._path_seperation_hop = 2
         self._path_seperation_threshold = 0.5
         self._target_speed = target_speed
         self._grp = None
+        self.drawn_lights = False
+        self.is_affected_by_traffic_light = False
 
     def set_destination(self, location):
         """
@@ -87,14 +94,24 @@ class BasicAgent(Agent):
         :return: carla.VehicleControl
         """
 
+        new_target_speed = self._update_target_speed(debug)
+
         # is there an obstacle in front of us?
         hazard_detected = False
 
         # retrieve relevant elements for safe navigation, i.e.: traffic lights
         # and other vehicles
-        actor_list = self._world.get_actors()
-        vehicle_list = actor_list.filter("*vehicle*")
-        lights_list = actor_list.filter("*traffic_light*")
+        actor_list = self._world.get_actors()  # type: ActorList
+        vehicle_list = actor_list.filter("*vehicle*")  # type: List[Actor]
+        lights_list = actor_list.filter("*traffic_light*")  # type: List[carla.TrafficLight]
+
+        if not self.drawn_lights and debug:
+            for light in lights_list:
+                self._world.debug.draw_box(
+                    carla.BoundingBox(light.trigger_volume.location + light.get_transform().location,
+                                      light.trigger_volume.extent * 2),
+                    carla.Rotation(0, 0, 0), 0.05, carla.Color(255, 128, 0, 0), 0)
+            self.drawn_lights = True
 
         # check possible obstacles
         vehicle_state, vehicle = self._is_vehicle_hazard(vehicle_list)
@@ -105,6 +122,7 @@ class BasicAgent(Agent):
             self._state = AgentState.BLOCKED_BY_VEHICLE
             hazard_detected = True
 
+        """
         # check for the state of the traffic lights
         light_state, traffic_light = self._is_light_red(lights_list)
         if light_state:
@@ -113,6 +131,7 @@ class BasicAgent(Agent):
 
             self._state = AgentState.BLOCKED_RED_LIGHT
             hazard_detected = True
+        """
 
         if hazard_detected:
             control = self.emergency_stop()
@@ -120,6 +139,8 @@ class BasicAgent(Agent):
             self._state = AgentState.NAVIGATING
             # standard local planner behavior
             control = self._local_planner.run_step(debug=debug)
+            if self.stopping_for_traffic_light:
+                control.steer = 0.0
 
         return control
 
@@ -129,3 +150,70 @@ class BasicAgent(Agent):
         :return bool
         """
         return self._local_planner.done()
+
+    def _update_target_speed(self, debug):
+        MAX_PERCENTAGE_OF_SPEED_LIMIT = 0.75
+        speed_limit = self._vehicle.get_speed_limit()  # km/h
+        current_speed = get_speed(self._vehicle)
+        new_target_speed = speed_limit * MAX_PERCENTAGE_OF_SPEED_LIMIT
+
+        use_custom_traffic_light_speed = True
+        if use_custom_traffic_light_speed:
+            TRAFFIC_LIGHT_SECONDS_AWAY = 3
+            METERS_TO_STOP_BEFORE_TRAFFIC_LIGHT = 8
+            get_traffic_light = self._vehicle.get_traffic_light()  # type: carla.TrafficLight
+            nearest_traffic_light, distance = get_nearest_traffic_light(self._vehicle)  # type: carla.TrafficLight, float
+            distance_to_light = distance
+            distance -= METERS_TO_STOP_BEFORE_TRAFFIC_LIGHT
+
+            if nearest_traffic_light is None:
+                nearest_traffic_light = get_traffic_light
+
+            # Draw debug info
+            if debug and nearest_traffic_light is not None:
+                self._world.debug.draw_point(
+                    nearest_traffic_light.get_transform().location,
+                    size=1,
+                    life_time=0.1,
+                    color=carla.Color(255, 15, 15))
+            """
+            if get_traffic_light is not None:
+                print("get_traffic_light:     ", get_traffic_light.get_location() if get_traffic_light is not None else "None", " ", get_traffic_light.state if get_traffic_light is not None else "None")
+    
+            if nearest_traffic_light is not None:
+                print("nearest_traffic_light: ",  nearest_traffic_light.get_location() if nearest_traffic_light is not None else "None", " ", nearest_traffic_light.state if nearest_traffic_light is not None else "None")
+            """
+
+            ego_vehicle_location = self._vehicle.get_location()
+            ego_vehicle_waypoint = self._map.get_waypoint(ego_vehicle_location)
+
+            self.is_affected_by_traffic_light = False
+            self.stopping_for_traffic_light = False
+            if ego_vehicle_waypoint.is_junction:
+                # It is too late. Do not block the intersection! Keep going!
+                pass
+
+            # Check if we should start braking
+            elif distance_to_light <= TRAFFIC_LIGHT_SECONDS_AWAY * new_target_speed / 3.6 and nearest_traffic_light is not None and nearest_traffic_light.state != carla.TrafficLightState.Green:
+                self.is_affected_by_traffic_light = True
+                brake_distance = current_speed / 3.6 * TRAFFIC_LIGHT_SECONDS_AWAY
+                print("TL distance: ", distance_to_light, ", distance (to stop): ", distance, ", distance travel 4 secs: ", brake_distance)
+                new_target_speed = self._target_speed
+                if distance <= 0:
+                    new_target_speed = 0
+                    self.stopping_for_traffic_light = True
+                    print("Stopping before traffic light, distance  ", distance, "m")
+                elif brake_distance >= distance and brake_distance != 0:
+                    percent_before_light = (brake_distance - distance) / brake_distance
+                    new_target_speed = speed_limit - max(0, percent_before_light) * speed_limit
+                    print("Slowing down before traffic light ", percent_before_light * 100, "% ", new_target_speed, " km/h")
+
+        self._set_target_speed(max(0, new_target_speed))
+        return new_target_speed
+
+    def _set_target_speed(self, target_speed: int):
+        """
+        This function updates all the needed values required to actually set a new target speed
+        """
+        self._target_speed = target_speed
+        self._local_planner.set_speed(target_speed)
