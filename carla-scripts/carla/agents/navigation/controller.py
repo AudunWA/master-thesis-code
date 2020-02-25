@@ -60,8 +60,8 @@ class VehiclePIDController():
 
         control = carla.VehicleControl()
         control.steer = steering
-        control.throttle = throttle
-        control.brake = 0.0
+        control.throttle = max(0, throttle)
+        control.brake = min(0, throttle) * -1
         control.hand_brake = False
         control.manual_gear_shift = False
 
@@ -120,7 +120,7 @@ class PIDLongitudinalController():
             _de = 0.0
             _ie = 0.0
 
-        return np.clip((self._K_P * _e) + (self._K_D * _de / self._dt) + (self._K_I * _ie * self._dt), 0.0, 1.0)
+        return np.clip((self._K_P * _e) + (self._K_D * _de / self._dt) + (self._K_I * _ie * self._dt), -1.0, 1.0)
 
 
 class PIDLateralController():
@@ -128,7 +128,7 @@ class PIDLateralController():
     PIDLateralController implements lateral control using a PID.
     """
 
-    def __init__(self, vehicle, K_P=1.0, K_D=0.0, K_I=0.0, dt=0.03):
+    def __init__(self, vehicle, K_P=1.0, K_D=0.0, K_I=0.0, dt=1.0/20.0):
         """
         :param vehicle: actor to apply to local planner logic onto
         :param K_P: Proportional term

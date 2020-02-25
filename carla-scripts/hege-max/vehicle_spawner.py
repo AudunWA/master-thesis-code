@@ -167,7 +167,7 @@ class  VehicleSpawner(object):
         self._all_actors = self.world.get_actors(self._all_id)
 
         # wait for a tick to ensure client receives the last transform of the walkers we have just created
-        self.world.wait_for_tick()
+        self.world.tick()
 
         # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
         for i in range(0, len(self._all_id), 2):

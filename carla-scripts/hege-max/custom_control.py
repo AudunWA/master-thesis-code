@@ -65,6 +65,7 @@ from typing import Optional, List
 
 from agents.navigation.agent import Agent
 from agents.navigation.basic_agent import BasicAgent
+from agents.tools.misc import get_nearest_traffic_light
 from utils import init_tensorflow
 
 # ==============================================================================
@@ -248,6 +249,8 @@ class World(object):
         # Vehicle spawning 
         self._num_vehicles_min = None
         self._num_vehicles_max = None
+        self._num_walkers_min = None
+        self._num_walkers_max = None
         self._spawning_radius = None
         self._vehicle_spawner = VehicleSpawner(self.client, self.world)
 
@@ -286,6 +289,8 @@ class World(object):
         # Read vehicle settings 
         self._num_vehicles_min = int(settings.get("Spawning", "NumberOfVehiclesMin", fallback=0))
         self._num_vehicles_max = int(settings.get("Spawning", "NumberOfVehiclesMax", fallback=0))
+        self._num_walkers_min = int(settings.get("Spawning", "NumberOfWalkersMin", fallback=0))
+        self._num_walkers_max = int(settings.get("Spawning", "NumberOfWalkersMax", fallback=0))
         self._spawning_radius = float(settings.get("Spawning", "SpawnRadius", fallback=0))
 
         # Read autotimeout: The duration of an episode in server autopilot 
@@ -387,14 +392,15 @@ class World(object):
         self.world.tick()
 
         # Create Autopilot 
-        self._client_ap = BasicAgent(self.player, dt=FIXED_DELTA_SECONDS)
-        self._client_ap._local_planner._dt = FIXED_DELTA_SECONDS
-        self._client_ap.set_destination((destination_point.location.x,
-                                         destination_point.location.y,
-                                         destination_point.location.z))
+        self.client_ap = BasicAgent(self.player)
+        # self._client_ap = BasicAgent(self.player, dt=FIXED_DELTA_SECONDS)
+        # self._client_ap._local_planner._dt = FIXED_DELTA_SECONDS
+        self.client_ap.set_destination((destination_point.location.x,
+                                        destination_point.location.y,
+                                        destination_point.location.z))
 
         # Set up the sensors.
-        self.camera_manager = CameraManager(self.player, self._client_ap, self.hud,
+        self.camera_manager = CameraManager(self.player, self.client_ap, self.hud,
                                             self.history, self._eval_mode, self._hq_recording)
         self.camera_manager._transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
@@ -414,7 +420,7 @@ class World(object):
         # Spawn other vehicles, but not in eval mode  
         if not self._eval_mode and self._num_vehicles_max != 0 and self._spawning_radius is not None:
             self._vehicle_spawner.spawn_nearby(self._spawn_point_start, self._num_vehicles_min, self._num_vehicles_max,
-                                               0, 200, self._spawning_radius)
+                                               self._num_walkers_min, self._num_walkers_max, self._spawning_radius)
 
         # Change weather 
         if self._change_weather == True and self._eval_mode == False:
@@ -436,12 +442,12 @@ class World(object):
         self._weather_index %= len(self._weather_presets)
 
         # Only choose clear weather 
-        if weather_type == WeatherType.CLEAR and self._weather_index > 3:
+        if weather_type == WeatherType.CLEAR and self._weather_index > 4:
             self._weather_index = 0
 
         # Only choose rainy/wet weather 
-        if weather_type == WeatherType.RAIN and self._weather_index < 4:
-            self._weather_index = 4
+        if weather_type == WeatherType.RAIN and self._weather_index < 5:
+            self._weather_index = 5
 
         preset = self._weather_presets[self._weather_index]
         self.hud.notification('Weather: %s' % preset[1])
@@ -489,6 +495,7 @@ class World(object):
         self.camera_manager._index = None
 
     def destroy(self):
+        self._vehicle_spawner.destroy_vehicles()
         actors = [
             self.camera_manager.sensor,
             self.player
@@ -497,7 +504,6 @@ class World(object):
             if actor is not None:
                 actor.destroy()
         self.camera_manager._destroy_sensors()
-        self._vehicle_spawner.destroy_vehicles()
 
         if self.evaluator:
             self.evaluator.destroy_sensors()
@@ -866,14 +872,10 @@ class KeyboardControl(object):
         elif self._control_type == ControlType.DRIVE_MODEL:
             self._parse_drive_model_commands(world)
 
-        # Plot segmentation output
-        if self.segmentation_model is not None and "forward_center_rgb" in world.history._latest_images.keys():
-            self.segmentation_model.plot_segmentation(world.history._latest_images)
-
         # Client Autopilot Driving 
         elif self._control_type == ControlType.CLIENT_AP:
             # Update HLC to current RoadOption 
-            world.history.update_hlc(world._client_ap._local_planner._target_road_option)
+            world.history.update_hlc(world.client_ap._local_planner._target_road_option)
 
             # Update lane check 
             is_left = is_valid_lane_change(RoadOption.CHANGELANELEFT, world)
@@ -881,9 +883,6 @@ class KeyboardControl(object):
 
             is_right = is_valid_lane_change(RoadOption.CHANGELANERIGHT, world)
             world.history.update_right_lane_change_valid(is_right)
-
-            # Set target speed to current speed limit - 10 km/h, max 60 km/h
-            world._client_ap._local_planner.set_speed(min(60, world.player.get_speed_limit() - 10))
 
             self._parse_client_ap(world)
 
@@ -895,12 +894,16 @@ class KeyboardControl(object):
             distance = math.sqrt(dx * dx + dy * dy)
 
             # Change route if client AP has reached its destination
-            if distance < 20:
+            if distance < 25:
                 world.hud.notification("Route Complete")
                 world.restart()
                 # Exit program if all routes are finished 
                 if world._quit_next:
                     return True
+
+        # Plot segmentation output
+        if self.segmentation_model is not None and "forward_center_rgb" in world.history._latest_images.keys():
+            self.segmentation_model.plot_segmentation(world.history._latest_images)
 
         # Automatic Lane Change
         if self._lane_change_activated != None:
@@ -972,7 +975,16 @@ class KeyboardControl(object):
         closest_wp = world.map.get_waypoint(world.player.get_location())
         lane_yaw = closest_wp.transform.rotation.yaw
 
+        # light, distance = get_nearest_traffic_light(player)
+        # red_light = 0 if \
+        #     distance <= 40 \
+        #     and light is not None \
+        #     and light.state != carla.TrafficLightState.Green \
+        #     else 1
+
         red_light = 0 if player.get_traffic_light_state() == carla.TrafficLightState.Red else 1
+
+        """
         if not closest_wp.is_junction:
             self._entered_traffic_light_loc = None
         elif self._entered_traffic_light_loc is None:
@@ -982,6 +994,7 @@ class KeyboardControl(object):
             print(get_distance(player_loc, self._entered_traffic_light_loc))
             if get_distance(player_loc, self._entered_traffic_light_loc) > 1:
                 red_light = 1
+        """
 
         v = player.get_velocity()
 
@@ -1005,7 +1018,7 @@ class KeyboardControl(object):
 
         self._control.throttle = max(min(float(throttle), 1), 0)
 
-        self._control.brake = 1 if float(brake) > 0.3 else 0
+        self._control.brake = float(brake) if brake > 0.02 else 0 # 1 if float(brake) > 0.3 else 0
 
     def _parse_vehicle_keys(self, world: World, keys: List[int], milliseconds: int):
         self._control.throttle = 1.0 if keys[K_UP] or keys[K_w] else 0.0
@@ -1023,8 +1036,7 @@ class KeyboardControl(object):
         self._control.hand_brake = keys[K_SPACE]
 
     def _parse_client_ap(self, world: World):
-        noise = np.random.uniform(-self._noise_amount, self._noise_amount)
-        client_autopilot_control = world._client_ap.run_step(debug=False)
+        client_autopilot_control = world.client_ap.run_step(debug=False)
         world.history.update_client_autopilot_control(client_autopilot_control)
         self._control.brake = client_autopilot_control.brake
         self._control.throttle = client_autopilot_control.throttle
@@ -1409,7 +1421,7 @@ class CameraManager(object):
             sensor.destroy()
 
         if self.sensor is not None:
-            self.sensor.destroy
+            self.sensor.destroy()
 
     def toggle_camera(self):
         self._transform_index = (self._transform_index + 1) % len(
@@ -1516,7 +1528,7 @@ class History:
         self._driving_log = pd.DataFrame(columns=[
             "ForwardCenter", "ForwardLeft", "ForwardRight", "LeftCenter",
             "RightCenter", "Location", "Velocity", "Controls", "ClientAutopilotControls", "ControlType",
-            "LeftLaneChangeValid", "RightLaneChangeValid", "TrafficLight",
+            "LeftLaneChangeValid", "RightLaneChangeValid", "TrafficLight", "DeprecatedTrafficLight",
             "SpeedLimit", "HLC", "Environment", "WheaterId"
         ])
         self._timestamp = time.strftime("%Y-%m-%d_%H-%M-%S",
@@ -1581,8 +1593,10 @@ class History:
         output_path = Path(self._output_folder + '/' + self._timestamp)
         image_path = output_path / "imgs"
 
-        red_light = 0 if player.get_traffic_light_state(
-        ) == carla.TrafficLightState.Red else 1
+        light = get_nearest_traffic_light(player)[0]
+        red_light = 0 if client_ap.is_affected_by_traffic_light and light is not None and light.state != carla.TrafficLightState.Green else 1
+
+        deprecated_red_light = 0 if player.get_traffic_light_state() == carla.TrafficLightState.Red else 1
 
         speed = math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2)
         if math.isnan(c.steer) or (self.control_type == ControlType.CLIENT_AP and math.isnan(client_ap_c.steer)):
@@ -1604,6 +1618,7 @@ class History:
                 1 if self._left_lane_change_valid else 0,
                 1 if self._right_lane_change_valid else 0,
                 red_light,
+                deprecated_red_light,
                 player.get_speed_limit() / 3.6,
                 hlc.value,
                 self._environment.value,
@@ -1971,80 +1986,84 @@ class Evaluator():
 # ==============================================================================
 
 
-def game_loop(args, settings):
+def game_loop(args):
     pygame.init()
     pygame.font.init()
     world = None
 
-    try:
+    client = carla.Client(args.host, args.port)
+    client.set_timeout(15.0)
 
-        client = carla.Client(args.host, args.port)
-        client.load_world("Town01")
-        sim_world = client.get_world()  # type: carla.World
-        map_name = sim_world.get_map().name
-        client.set_timeout(15.0)
+    client.load_world("Town01")
+    sim_world = client.get_world()  # type: carla.World
+    map_name = sim_world.get_map().name
 
-        # Enable synchronous mode
-        sim_settings = sim_world.get_settings()
-        sim_settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
-        sim_settings.synchronous_mode = True
-        sim_world.apply_settings(sim_settings)
+    # Enable synchronous mode
+    sim_settings = sim_world.get_settings()
+    sim_settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
+    sim_settings.synchronous_mode = True
+    sim_world.apply_settings(sim_settings)
 
-        # Get environment 
-        if map_name == "Town01" or map_name == "Town02":
-            environment = Environment.RURAL
-        elif map_name == "Town04":
-            environment = Environment.HIGHWAY
-        else:
-            environment = Environment.RURAL
+    from glob import glob
+    for settings_path in sorted(glob(str("settings/*.ini"))):
+        try:
+            settings = ConfigParser()
+            settings.read(settings_path)
+            print("Running with settings file ", settings_path)
 
-        # Set display 
-        display = pygame.display.set_mode((args.width, args.height),
-                                          pygame.HWSURFACE | pygame.DOUBLEBUF)
+            # Get environment
+            if map_name == "Town01" or map_name == "Town02":
+                environment = Environment.RURAL
+            elif map_name == "Town04":
+                environment = Environment.HIGHWAY
+            else:
+                environment = Environment.RURAL
 
-        hud = HUD(args.width, args.height)
-        history = History(args.output, environment)
-        world = World(
-            client,
-            sim_world,
-            hud,
-            environment,
-            history,
-            args.filter,
-            settings,
-            hq_recording=False)
+            # Set display
+            display = pygame.display.set_mode((args.width, args.height),
+                                              pygame.HWSURFACE | pygame.DOUBLEBUF)
 
-        models = None
+            hud = HUD(args.width, args.height)
+            history = History(args.output, environment)
+            world = World(
+                client,
+                sim_world,
+                hud,
+                environment,
+                history,
+                args.filter,
+                settings,
+                hq_recording=False)
 
-        # Program can be called with a folder of models to test 
-        if args.models is not None:
-            models = get_models(Path(args.models))
-            if models == False:
-                return
+            models = None
 
-        controller = KeyboardControl(world, settings, use_steering_wheel=args.joystick, models=models)
+            # Program can be called with a folder of models to test
+            if args.models is not None:
+                models = get_models(Path(args.models))
+                if models == False:
+                    continue
 
-        clock = pygame.time.Clock()
+            controller = KeyboardControl(world, settings, use_steering_wheel=args.joystick, models=models)
 
-        while True:
-            sim_world.tick()
-            # clock.tick(int(hud.server_fps_realtime))
-            clock.tick()
-            if controller.parse_events(client, world, clock):
-                return
-            world.tick(clock)
-            world.render(display)
-            pygame.display.flip()
+            clock = pygame.time.Clock()
 
-    finally:
+            while True:
+                sim_world.tick()
+                # clock.tick(int(hud.server_fps_realtime))
+                clock.tick()
+                if controller.parse_events(client, world, clock):
+                    break
+                world.tick(clock)
+                world.render(display)
+                pygame.display.flip()
+        finally:
+            if world is not None:
+                # Reset weather so program always starts in CLEAR NOON
+                world.reset_weather()
+                print("Destroying world")
+                world.destroy()
 
-        if world is not None:
-            # Reset weather so program always starts in CLEAR NOON
-            world.reset_weather()
-            print("Destroying world")
-            world.destroy()
-
-        pygame.quit()
+    pygame.quit()
 
 
 # ==============================================================================
@@ -2114,9 +2133,6 @@ def main():
     args = argparser.parse_args()
     args.width, args.height = [int(x) for x in args.res.split('x')]
 
-    settings = ConfigParser()
-    settings.read("settings.ini")
-
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
 
@@ -2125,8 +2141,7 @@ def main():
     print(__doc__)
 
     try:
-
-        game_loop(args, settings)
+        game_loop(args)
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')

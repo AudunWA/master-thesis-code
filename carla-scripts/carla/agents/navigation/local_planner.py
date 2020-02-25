@@ -13,6 +13,8 @@ from collections import deque
 import random
 
 import carla
+from carla.libcarla import Waypoint
+
 from agents.navigation.controller import VehiclePIDController
 from agents.tools.misc import distance_vehicle, draw_waypoints
 
@@ -63,16 +65,16 @@ class LocalPlanner(object):
         self._vehicle = vehicle
         self._map = self._vehicle.get_world().get_map()
 
-        self._dt = None
-        self._target_speed = None
-        self._sampling_radius = None
-        self._min_distance = None
-        self._current_waypoint = None
-        self._target_road_option = None
-        self._next_waypoints = None
-        self.target_waypoint = None
-        self._vehicle_controller = None
-        self._global_plan = None
+        self._dt = None  # type: float
+        self._target_speed = None  # type: float
+        self._sampling_radius = None  # type: float
+        self._min_distance = None  # type: float
+        self._current_waypoint = None  # type: Waypoint
+        self._target_road_option = None  # type: RoadOption
+        self._next_waypoints = None  # type: Waypoint
+        self.target_waypoint = None  # type: Waypoint
+        self._vehicle_controller = None  # type: VehiclePIDController
+        self._global_plan = None  # type: bool
         # queue with tuples of (waypoint, RoadOption)
         self._waypoints_queue = deque(maxlen=20000)
         self._buffer_size = 5
@@ -99,9 +101,7 @@ class LocalPlanner(object):
         """
         # default params
         self._dt = 1.0 / 20.0
-        self._target_speed = 20.0  # Km/h
-        self._sampling_radius = self._target_speed * 1 / 3.6  # 1 seconds horizon
-        self._min_distance = self._sampling_radius * self.MIN_DISTANCE_PERCENTAGE
+        self.set_speed(20.0)  # Km/h
         args_lateral_dict = {
             'K_P': 1.95,
             'K_D': 0.01,
@@ -127,10 +127,6 @@ class LocalPlanner(object):
             if 'longitudinal_control_dict' in opt_dict:
                 args_longitudinal_dict = opt_dict['longitudinal_control_dict']
 
-        # Set correct dt
-        args_lateral_dict['dt'] = self._dt
-        args_longitudinal_dict['dt'] = self._dt
-
         self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
         self._vehicle_controller = VehiclePIDController(self._vehicle,
                                                         args_lateral=args_lateral_dict,
@@ -145,7 +141,7 @@ class LocalPlanner(object):
         # fill waypoint trajectory queue
         self._compute_next_waypoints(k=200)
 
-    def set_speed(self, speed):
+    def set_speed(self, speed: float):
         """
         Request new target speed.
 
