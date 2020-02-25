@@ -551,7 +551,6 @@ def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_vani
     info_input = Input(shape=(seq_length, 3), name="info_input")
 
     segmentation_model = get_segmentation_model(segm_model)
-    segmentation_model.summary()
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
 
     x = concatenate([segmentation_output, hlc_input, info_input])

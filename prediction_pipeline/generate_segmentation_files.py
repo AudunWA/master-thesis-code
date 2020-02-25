@@ -2,7 +2,12 @@ import os
 from pathlib import Path
 import numpy as np
 import cv2
+from shutil import copyfile
+from prediction_pipeline.utils.cityspaces_labels import cityscapes_eight_classes
 from prediction_pipeline.utils.helpers import crop_and_resize, verify_folder_exists
+import matplotlib as mpl
+import matplotlib.cm as cm
+
 import shutil
 
 # Drivable road
@@ -105,9 +110,48 @@ def convert_segmentation_images(input_path, output_path):
         if i % 100 == 0:
             print("Progress: ", i, " of ", len(filenames))
 
+def convert_cityscape_segm_images(input_path, output_path):
+    filenames = os.listdir(str(data_folder / input_path))
+    output_folder = str(data_folder / output_path)
+    verify_folder_exists(output_folder)
 
+    i = 0
+    for filename in filenames:
 
+        # In BGR format
+        img = cv2.imread(str(data_folder / input_path / filename))
+        output_img = np.zeros(img.shape)
 
+        # For each pixel:
+        #  If pixel.color in road colors: set pixel to (0,0,0)
+        #  If pixel.color in lane marking colors: set pixel to (1,0,0)
+        #  Else: set pixel to (2,0,0)
+
+        for j, class_colors in enumerate(cityscapes_eight_classes):
+            for color in class_colors:
+                mask = (img == color[::-1]).all(axis=2)
+                output_img[mask] = [j+1, 0, 0]
+
+        write_path = str(Path(data_folder) / output_path / filename)
+
+        cv2.imwrite(write_path, output_img)
+
+        i += 1
+        if i % 100 == 0:
+            print("Progress: ", i, " of ", len(filenames))
+
+def copy_cityscapes_files(input_path, output_path, only_matching=None):
+    verify_folder_exists(output_path)
+    input_path = Path(input_path)
+    for folder in os.listdir(input_path):
+        for filename in os.listdir(str(input_path / folder)):
+            if only_matching is not None:
+                if not only_matching in filename:
+                    continue
+            output_name = str(output_path) + "/" + str(filename).replace(".png", str(folder + filename))
+            copyfile(str(input_path / folder / filename), output_name)
+
+"""
 # Prepare original images for train and validation
 crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/training/images/", data_folder / "images_prepped_train")
 crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/validation/images/", data_folder / "images_prepped_val")
@@ -122,7 +166,25 @@ crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/vali
 
 # Generate dataset with correct number of reduced classes
 
-convert_segmentation_images("output_cropped_train", "annotations_prepped_train")
+convert_segmentation_images("output_cropped_train", "segm_annotations_prepped_train")
 shutil.rmtree(train_cropped_segmentations)
-convert_segmentation_images("output_cropped_val", "annotations_prepped_val")
-shutil.rmtree(validation_cropped_segmentations)
+convert_segmentation_images("output_cropped_val", "segm_annotations_prepped_val")
+
+train_cropped_segmentations = data_folder / "depth_annotations_prepped_train"
+validation_cropped_segmentations = data_folder / "depth_annotations_prepped_val"
+
+crop_and_resize("/home/audun/monodepth2/train_depth_np/", train_cropped_segmentations)
+crop_and_resize("/home/audun/monodepth2/val_depth_np/", validation_cropped_segmentations)
+
+
+"""
+#copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/train", data_folder / "cityscapes_images")
+#copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/test", data_folder / "cityscapes_images")
+#copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/val", data_folder / "cityscapes_images")
+#copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/val", data_folder / "cityscapes_images")
+
+#copy_cityscapes_files("/home/audun/Downloads/gtCoarse/gtCoarse/train", data_folder / "cityscapes_labels", only_matching="color")
+#copy_cityscapes_files("/home/audun/Downloads/gtCoarse/gtCoarse/val", data_folder / "cityscapes_labels", only_matching="color")
+#copy_cityscapes_files("/home/audun/Downloads/gtCoarse/gtCoarse/train_extra", data_folder / "cityscapes_labels", only_matching="color")
+
+#convert_cityscape_segm_images("output_cropped_train", "segm_annotations_prepped_train")

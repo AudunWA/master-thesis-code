@@ -4,6 +4,8 @@ import cv2
 from keras_segmentation.predict import model_from_checkpoint_path
 from pathlib import Path
 from prediction_pipeline.utils.helpers import verify_folder_exists
+from prediction_pipeline.utils.pspnet import model_from_checkpoint_path, predict
+
 import numpy as np
 random.seed(1)
 
@@ -17,17 +19,19 @@ def segment_images(path_to_checkpoint, folder_name):
     verify_folder_exists(output_folder)
 
     for filename in os.listdir(str(data_folder / folder_name)):
+        out_name = str(output_folder / filename).replace("jpg", "png")
+
         in_name = str(data_folder / folder_name / filename)
-        out_name = str(output_folder / filename.replace("jpg", "png"))
 
-        res = checkpoint.predict_segmentation(
-            inp=in_name,
-            out_fname=out_name
+        predict(
+            model=checkpoint,
+            out_fname=out_name,
+            inp=in_name
         )
-        print("Res",np.unique(res))
 
 
-checkpoint_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
+
+checkpoint_path = "data/segmentation_models/pspnet_8_classes/2020-02-25_12-17-06/pspnet_8_classes"
 
 segment_images(checkpoint_path, "mapillary")
 
