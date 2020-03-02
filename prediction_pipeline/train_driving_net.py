@@ -13,7 +13,7 @@ import time
 from keras.backend import tf
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.engine.saving import load_model
-from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, CuDNNLSTM
+from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, CuDNNLSTM, BatchNormalization, Activation
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.utils import Sequence
@@ -27,6 +27,7 @@ three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_chec
 seven_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_seven"
 seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
 seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
+resnet50_pspnet_8_classes = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
 
 checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
 
@@ -242,7 +243,7 @@ def load_driving_logs(dataset_folders: List[str], use_side_cameras: bool, steeri
                 # Normalize max speed (60km/h) between -1 and 1
                 speed = float(row["Velocity"]) * 3.6 / 30 - 1
                 speed_limit = float(row["SpeedLimit"]) * 3.6 / 30 - 1
-                traffic_light = int(row["TrafficLight"])
+                traffic_light = int(row["NewTrafficLight"])
 
                 hlc = row["HLC"]
                 if hlc == 0 or hlc == -1:
@@ -569,6 +570,12 @@ def get_segmentation_model(model_type, freeze=True):
         output_layer = get_layer_with_name(segmentation_model, "conv_dw_6_relu")
         x = output_layer.output
 
+    elif model_type == "resnet50_pspnet_8_classes":
+        segmentation_model = model_from_checkpoint_path(resnet50_pspnet_8_classes)
+        segmentation_model.summary()
+        output_layer = segmentation_model.get_layer(name="conv2d_6")
+        x = output_layer.output
+
     x = Flatten()(x)
 
     # Explicitly define new model input and output by slicing out old model layers
@@ -583,24 +590,34 @@ def get_segmentation_model(model_type, freeze=True):
 
 
 def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_vanilla_psp", print_summary=True):
-    forward_image_input = Input(shape=(seq_length, 224, 224, 3), name="forward_image_input")
+    forward_image_input = Input(shape=(seq_length, 384, 576, 3), name="forward_image_input")
     hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
     info_input = Input(shape=(seq_length, 3), name="info_input")
 
     segmentation_model = get_segmentation_model(segm_model)
     segmentation_model.summary()
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
-
+    segmentation_output = BatchNormalization()(segmentation_output)
+    segmentation_output = Activation(activation="relu")(segmentation_output)
     x = concatenate([segmentation_output, hlc_input, info_input])
 
-    x = TimeDistributed(Dense(100, activation="relu"))(x)
+    x = TimeDistributed(Dense(300, activation="relu"))(x)
 
-    x = CuDNNLSTM(10, return_sequences=False)(x)
+    steer_pred = CuDNNLSTM(10, return_sequences=False)(x)
+    steer_pred = Dense(10, activation="relu")(steer_pred)
+    steer_pred = Dense(10, activation="relu")(steer_pred)
+    throtte_pred = CuDNNLSTM(10, return_sequences=False)(x)
+    throtte_pred = Dense(10, activation="relu")(throtte_pred)
+    throtte_pred = Dense(10, activation="relu")(throtte_pred)
+    brake_pred = CuDNNLSTM(10, return_sequences=False)(x)
+    brake_pred = Dense(10, activation="relu")(brake_pred)
+    brake_pred = Dense(10, activation="relu")(brake_pred)
+
     steer_dim = 1 if not sine_steering else 10
-    steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(x)
+    steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(steer_pred)
 
-    throtte_pred = Dense(1, name="throttle_pred", activation="sigmoid")(x)
-    brake_pred = Dense(1, name="brake_pred", activation="sigmoid")(x)
+    throtte_pred = Dense(1, name="throttle_pred", activation="sigmoid")(throtte_pred)
+    brake_pred = Dense(1, name="brake_pred", activation="sigmoid")(brake_pred)
     model = Model(inputs=[forward_image_input, hlc_input, info_input], outputs=[steer_pred, throtte_pred, brake_pred])
     model.summary()
 
@@ -643,11 +660,11 @@ class generator(Sequence):
         if not self.validation:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 224, 224, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, 576, 384, imgNorm="sub_mean", ordering='channels_last') for image in seq])
         else:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 224, 224, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, 576, 384, imgNorm="sub_mean", ordering='channels_last') for image in seq])
 
         return {
                    "forward_image_input": np.array(forward_imgs),
@@ -660,29 +677,87 @@ class generator(Sequence):
                }
 
 
-## Parameters
+def build_or_load_model(
+        model_name: str,
+        seq_length: int,
+        sampling_interval: int,
+        sine_steering: bool,
+        segmentation_model_name: str,
+        use_side_cameras: bool
+) -> Tuple[Model, Path, configparser.ConfigParser, int]:
+    model_candidates = sorted(glob("data/driving_models/" + model_name + "/*/*.h5"), reverse=True)
+
+    resume_training = 'n'
+    if len(model_candidates) > 0:
+        resume_training = input(
+            "Found existing model(s) with same name. Do you want to continue the last session of " + model_name + "? (Y/n)").strip()
+
+    if resume_training.lower() == '' or resume_training.lower() == 'y':
+        model_path = model_candidates[0]
+        model_folder = Path(os.path.dirname(model_path))
+        initial_epoch = int(model_path.split("/")[-1].split('_')[0])  # 0-based in Keras, so no need to +1
+        config = configparser.ConfigParser()
+        config.read(model_folder / "config.ini")
+        return load_model(model_path, compile=True,
+                          custom_objects={"custom": root_mean_squared_error}), model_folder, config, initial_epoch
+    else:
+        # Prepare for logging
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
+        path = Path('data/driving_models') / model_name / timestamp
+        if not os.path.exists(str(path)):
+            os.makedirs(str(path))
+
+        # Save parmeters to disk
+        with open(str(path / "parameters.txt"), "w") as text_file:
+            text_file.write(parameters_string)
+
+        # Save config file to disk
+        model_type = "lstm"
+        config = configparser.ConfigParser()
+        config["ModelConfig"] = {
+            'Model': model_type,
+            'sequence_length': seq_length,
+            'sampling_interval': sampling_interval,
+            'segmentation_model_name': segmentation_model_name,
+            'sine_steering': sine_steering,
+            'use_side_cameras': use_side_cameras,
+        }
+        with open(str(path / 'config.ini'), 'w') as configfile:
+            config.write(configfile)
+
+        # Build model
+        model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering,
+                               segm_model=segmentation_model_name)
+
+        # Compile model
+        model.compile(loss=[steer_loss(), mean_squared_error, mean_squared_error], optimizer=Adam())
+        return model, path, config, 0
 
 
+# Parameters
 val_split = 0.8
 adjust_hlc = False
 
 epochs_list = [100]
 
-dataset_folders_lists = [["Town01_simple_noise"]]
+dataset_folders_lists = [["cleaned_clear_traffic", "cleaned_rain_traffic"]]
+# dataset_folders_lists = [["cleaned_clear_traffic", "cleaned_rain_traffic", "easy_traffic_lights_rain", "easy_traffic_lights_clear"]]
 
 steering_corrections = [0.05]
 
-batch_sizes = [64]
+batch_sizes = [32]
 
 sampling_intervals = [3]
 
-seq_lengths = [5]
+seq_lengths = [2]
 
-sine_steering_list = [True, False]
+sine_steering_list = [True]
 
-balance_data_list = [True]
+balance_data_list = [False]
 
 use_side_cameras_list = [True]
+
+segmentation_model_name_list = ["resnet50_pspnet_8_classes"]
 
 # ## Training loop
 parameter_permutations = itertools.product(epochs_list,
@@ -693,67 +768,16 @@ parameter_permutations = itertools.product(epochs_list,
                                            seq_lengths,
                                            sine_steering_list,
                                            balance_data_list,
-                                           use_side_cameras_list)
+                                           use_side_cameras_list,
+                                           segmentation_model_name_list)
 
 # Train a new model for each parameter permutation, and save the best models
 model_name = input("Name of model test: ").strip()
-segmentation_model_name = "seven_class_vanilla_psp"
 
 parameter_permutations_list = [p for p in parameter_permutations]
-
-
-def build_or_load_model(model_name: str, seq_length: int, sampling_interval: int, sine_steering: bool,
-                        segmentation_model_name: str, use_side_cameras: bool) -> Tuple[
-    Model, Path, configparser.ConfigParser]:
-    model_candidates = sorted(glob("data/driving_models/" + model_name + "/*/*.h5"), reverse=True)
-
-    if model_candidates:
-        choice = input(
-            "Found existing model(s) with same name. Do you want to continue the last session of " + model_name + "? (Y/n)").strip()
-        if choice.lower() == '' or choice.lower() == 'y':
-            model_path = model_candidates[0]
-            model_folder = Path(os.path.dirname(model_path))
-            config = configparser.ConfigParser()
-            config.read(model_folder / "config.ini")
-            return load_model(model_path, compile=True,
-                              custom_objects={"custom": root_mean_squared_error}), model_folder, config
-
-    # Prepare for logging
-    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
-    path = Path('data/driving_models') / model_name / timestamp
-    if not os.path.exists(str(path)):
-        os.makedirs(str(path))
-
-    # Save parmeters to disk
-    with open(str(path / "parameters.txt"), "w") as text_file:
-        text_file.write(parameters_string)
-
-    # Save config file to disk
-    model_type = "lstm"
-    config = configparser.ConfigParser()
-    config["ModelConfig"] = {
-        'Model': model_type,
-        'sequence_length': seq_length,
-        'sampling_interval': sampling_interval,
-        'segmentation_model_name': segmentation_model_name,
-        'sine_steering': sine_steering,
-        'use_side_cameras': use_side_cameras,
-    }
-    with open(str(path / 'config.ini'), 'w') as configfile:
-        config.write(configfile)
-
-    # Build model
-    model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering,
-                           segm_model=segmentation_model_name)
-
-    # Compile model
-    model.compile(loss=[steer_loss(), mean_squared_error, mean_squared_error], optimizer=Adam())
-    return model, path, config
-
-
 for parameters in parameter_permutations_list:
     # Get parameters
-    epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data, use_side_cameras = parameters
+    epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data, use_side_cameras, segmentation_model_name = parameters
     parameters_string = (
         "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\nuse_side_cameras:\t\t{}\n\n"
             .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
@@ -762,28 +786,26 @@ for parameters in parameter_permutations_list:
     # town1_dataset_folders, town4_dataset_folders = dataset_folders
 
     # Get model
-    model, path, config = build_or_load_model(model_name, seq_length, sampling_interval, sine_steering,
-                                              segmentation_model_name, use_side_cameras)
+    model, path, config, initial_epoch = build_or_load_model(model_name, seq_length, sampling_interval, sine_steering,
+                                                             segmentation_model_name, use_side_cameras)
+
+    # We only use the most essential parameters if we resume training,
+    # as we may want to continue training with other params.
     model_config = config["ModelConfig"]
     seq_length = int(model_config["sequence_length"])
     sampling_interval = int(model_config["sampling_interval"])
     sine_steering = bool(model_config.get("sine_steering", True))
     segmentation_model_name = model_config.get("segmentation_model_name", "seven_class_vanilla_psp")
-    use_side_cameras = bool(model_config.get("use_side_cameras", False))
-
-    parameters_string = (
-        "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\nuse_side_cameras:\t\t{}\n\n"
-            .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
-                    sampling_interval, seq_length, use_side_cameras))
 
     checkpoint_val = ModelCheckpoint(
         str(path / (
             '{epoch:02d}_s{val_steer_pred_loss:.4f}_t{val_throttle_pred_loss:.4f}_b{val_brake_pred_loss:.4f}.h5')),
         monitor='val_loss',
-        verbose=1, save_best_only=True, mode="min")
+        verbose=1, save_best_only=False, mode="min")
 
     # Load drive logs and paths
     inputs, targets = load_driving_logs(dataset_folders, use_side_cameras, steering_correction)
+
     inputs_flat, targets_flat = prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length)
 
     # Balance data
@@ -818,6 +840,10 @@ for parameters in parameter_permutations_list:
     targets_train, targets_val = split_dict(targets_flat, split_pos)
 
     # Print training info
+    parameters_string = (
+        "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\nuse_side_cameras:\t\t{}\n\n"
+            .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
+                    sampling_interval, seq_length, use_side_cameras))
     train_num = len(inputs_train["forward_imgs"])
     val_num = len(inputs_val["forward_imgs"])
     print("Initiate training loop with the following parameters:")
@@ -846,7 +872,8 @@ for parameters in parameter_permutations_list:
         steps_per_epoch=steps,
         validation_steps=steps_val,
         use_multiprocessing=True,
-        workers=10
+        workers=10,
+        initial_epoch=initial_epoch
     )
 
     # Prepare plot and save it to disk
@@ -857,8 +884,8 @@ for parameters in parameter_permutations_list:
     ax.plot(history_object.history['val_steer_pred_loss'], color="blue", linestyle="--")
     ax.plot(history_object.history['throttle_pred_loss'], color="green")
     ax.plot(history_object.history['val_throttle_pred_loss'], color="green", linestyle="--")
-    ax.plot(history_object.history['brake_pred_loss'], color="green")
-    ax.plot(history_object.history['val_brake_pred_loss'], color="green", linestyle="--")
+    ax.plot(history_object.history['brake_pred_loss'], color="red")
+    ax.plot(history_object.history['val_brake_pred_loss'], color="red", linestyle="--")
 
     ax.set_title("Mean squared loss of: throttle, brake, and steer")
     ax.set_xlabel("epochs")
