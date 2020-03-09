@@ -9,6 +9,7 @@
 """ This module implements an agent that roams around a track following random
 waypoints and avoiding other vehicles.
 The agent also responds to traffic lights. """
+import math
 from typing import List
 
 import carla
@@ -94,7 +95,6 @@ class BasicAgent(Agent):
         :return: carla.VehicleControl
         """
 
-        new_target_speed = self._update_target_speed(debug)
 
         # is there an obstacle in front of us?
         hazard_detected = False
@@ -103,6 +103,7 @@ class BasicAgent(Agent):
         # and other vehicles
         actor_list = self._world.get_actors()  # type: ActorList
         vehicle_list = actor_list.filter("*vehicle*")  # type: List[Actor]
+        pedestrians_list = actor_list.filter("*walker.pedestrian*")
         lights_list = actor_list.filter("*traffic_light*")  # type: List[carla.TrafficLight]
 
         if not self.drawn_lights and debug:
@@ -122,7 +123,15 @@ class BasicAgent(Agent):
             self._state = AgentState.BLOCKED_BY_VEHICLE
             hazard_detected = True
 
-        """
+        # Check for pedestrians
+        pedestrian_state, pedestrian = self._is_pedestrian_hazard(pedestrians_list)
+        if pedestrian_state:
+            if debug:
+                print('!!! PEDESTRIAN BLOCKING AHEAD [{}])'.format(pedestrian.id))
+
+            self._state = AgentState.BLOCKED_BY_VEHICLE
+            hazard_detected = True
+
         # check for the state of the traffic lights
         light_state, traffic_light = self._is_light_red(lights_list)
         if light_state:
@@ -131,16 +140,28 @@ class BasicAgent(Agent):
 
             self._state = AgentState.BLOCKED_RED_LIGHT
             hazard_detected = True
-        """
 
-        if hazard_detected:
-            control = self.emergency_stop()
-        else:
-            self._state = AgentState.NAVIGATING
-            # standard local planner behavior
-            control = self._local_planner.run_step(debug=debug)
-            if self.stopping_for_traffic_light:
-                control.steer = 0.0
+        new_target_speed = self._update_target_speed(hazard_detected, debug)
+
+        # if hazard_detected:
+        #     control = self.emergency_stop()
+        # else:
+        #     self._state = AgentState.NAVIGATING
+        #     self.braking_intial_speed = None
+        #     # standard local planner behavior
+        #     control = self._local_planner.run_step(debug=debug)
+        #     if self.stopping_for_traffic_light:
+        #         control.steer = 0.0
+
+        self._state = AgentState.NAVIGATING
+        self.braking_intial_speed = None
+        # standard local planner behavior
+        control = self._local_planner.run_step(debug=debug)
+        if self.stopping_for_traffic_light:
+            control.steer = 0.0
+        # Prevent from steering randomly when stopped
+        if math.fabs(get_speed(self._vehicle)) < 0.1:
+            control.steer = 0
 
         return control
 
@@ -151,13 +172,17 @@ class BasicAgent(Agent):
         """
         return self._local_planner.done()
 
-    def _update_target_speed(self, debug):
+    def _update_target_speed(self, hazard_detected, debug):
+        if hazard_detected:
+            self._set_target_speed(0)
+            return 0
+
         MAX_PERCENTAGE_OF_SPEED_LIMIT = 0.75
         speed_limit = self._vehicle.get_speed_limit()  # km/h
         current_speed = get_speed(self._vehicle)
         new_target_speed = speed_limit * MAX_PERCENTAGE_OF_SPEED_LIMIT
 
-        use_custom_traffic_light_speed = True
+        use_custom_traffic_light_speed = False
         if use_custom_traffic_light_speed:
             TRAFFIC_LIGHT_SECONDS_AWAY = 3
             METERS_TO_STOP_BEFORE_TRAFFIC_LIGHT = 8
