@@ -57,28 +57,21 @@ Use ARROWS or WASD keys for control.
 
 from __future__ import print_function
 
-import glob
+# VERY IMPORTANT, DO NOT REMOVE EVEN IF UNUSED
+# SEE https://github.com/tensorflow/tensorflow/issues/34828 and https://github.com/tensorflow/tensorflow/pull/34847
+# noinspection PyUnresolvedReferences
+import tensorflow
+####
+
 import os
-import sys
-# This is an alternative to running easy_install <carla egg file>
 from typing import Optional, List
 
 from agents.navigation.agent import Agent
 from agents.navigation.basic_agent import BasicAgent
-from agents.tools.misc import get_nearest_traffic_light
+from agents.navigation.controller import PIDLongitudinalController
+from agents.tools.misc import get_traffic_light_status
 from utils import init_tensorflow
 
-# ==============================================================================
-# -- find carla module ---------------------------------------------------------
-# ==============================================================================
-
-try:
-    sys.path.append(glob.glob('./carla/dist/carla-*%d.%d-%s.egg' % (
-        sys.version_info.major,
-        sys.version_info.minor,
-        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
-except IndexError:
-    pass
 
 FIXED_DELTA_SECONDS = 0.05
 
@@ -89,7 +82,7 @@ FIXED_DELTA_SECONDS = 0.05
 
 import carla
 
-from carla import ColorConverter as cc
+from carla import ColorConverter as cc, LaneInvasionEvent
 
 from pathlib import Path
 
@@ -206,19 +199,19 @@ class World(object):
         self.client = client
         self.world = carla_world
         self.map = self.world.get_map()
-        self.player = None  # type: Optional[carla.Vehicle]
+        self.player: Optional[carla.Vehicle] = None
         self._actor_filter = actor_filter
 
         # Other classes 
         self.hud = hud
         self.history = history
-        self.camera_manager = None  # type: Optional[CameraManager]
+        self.camera_manager: Optional[CameraManager] = None
 
         # Weather 
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
         self._change_weather = None
-        self._weather_type = None  # type: WeatherType
+        self._weather_type: WeatherType = None
 
         self.evaluator = Evaluator(self.hud, self)
 
@@ -227,7 +220,7 @@ class World(object):
         self._spawn_point_destination = 7
 
         # Eval mode 
-        self._eval_mode = None
+        self._eval_mode = False
         self._eval_num = None
         self._eval_num_current = None
         self._eval_cars = None
@@ -266,6 +259,9 @@ class World(object):
 
         # Init settings 
         self._initialize_settings(settings)
+
+        # Helper for braking in front of red lights
+        self.braking_initial_speed = None
 
         self.restart()
         self.world.on_tick(hud.on_world_tick)
@@ -401,7 +397,7 @@ class World(object):
 
         # Set up the sensors.
         self.camera_manager = CameraManager(self.player, self.client_ap, self.hud,
-                                            self.history, self._eval_mode, self._hq_recording)
+                                            self.history, self, self._eval_mode, self._hq_recording)
         self.camera_manager._transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
         self.camera_manager._initiate_recording()
@@ -463,7 +459,10 @@ class World(object):
 
     def next_spawn_point(self):
         if len(self.map.get_spawn_points()) > self._spawn_point_start:
-            self._new_spawn_point = self._spawn_point_start + 1
+            if self._routes is None:
+                self._new_spawn_point = self._spawn_point_start + 1
+            else:
+                self._new_spawn_point = None
             self.restart()
             self.hud.notification('Next spawn point')
         else:
@@ -515,14 +514,14 @@ class World(object):
 
 
 class KeyboardControl(object):
-    def __init__(self, world, settings, use_steering_wheel=False, models=None):
+    def __init__(self, world: World, settings, use_steering_wheel=False, models=None):
         self._world = world
 
         # Model 
         self._models = models
         self._drive_model = None
         self._current_model_idx = None
-        self.segmentation_model = None  # type: Optional[SegmentationModel]
+        self.segmentation_model: Optional[SegmentationModel] = None
 
         # Settings
         self._steering_wheel_enabled = use_steering_wheel
@@ -555,6 +554,9 @@ class KeyboardControl(object):
         # initialize steering wheel
         if self._steering_wheel_enabled:
             self._initialize_steering_wheel()
+
+        # Throttle/brake using PID controller
+        self._target_speed_pid: Optional[PIDLongitudinalController] = None
 
     def _initialize_model(self):
         init_tensorflow()
@@ -975,14 +977,9 @@ class KeyboardControl(object):
         closest_wp = world.map.get_waypoint(world.player.get_location())
         lane_yaw = closest_wp.transform.rotation.yaw
 
-        # light, distance = get_nearest_traffic_light(player)
-        # red_light = 0 if \
-        #     distance <= 40 \
-        #     and light is not None \
-        #     and light.state != carla.TrafficLightState.Green \
-        #     else 1
+        green_light = get_traffic_light_status(player)
 
-        red_light = 0 if player.get_traffic_light_state() == carla.TrafficLightState.Red else 1
+        # red_light = 0 if player.get_traffic_light_state() == carla.TrafficLightState.Red else 1
 
         """
         if not closest_wp.is_junction:
@@ -1001,7 +998,7 @@ class KeyboardControl(object):
         speed = math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2)
 
         info["speed"] = speed
-        info["traffic_light"] = red_light
+        info["traffic_light"] = green_light
         info["speed_limit"] = player.get_speed_limit() / 3.6
         info["hlc"] = world.history._latest_hlc
         info["environment"] = world._environment
@@ -1009,16 +1006,23 @@ class KeyboardControl(object):
         steer = 0
         throttle = 0
         brake = 0
+        target_speed = None
 
         if images["forward_center_rgb"] is not None:
-            steer, throttle, brake = self._drive_model.get_prediction(
+            steer, throttle, brake, target_speed = self._drive_model.get_prediction(
                 images, info)
 
         self._control.steer = float(steer)
 
-        self._control.throttle = max(min(float(throttle), 1), 0)
-
-        self._control.brake = float(brake) if brake > 0.02 else 0 # 1 if float(brake) > 0.3 else 0
+        if target_speed is not None:
+            if self._target_speed_pid is None or self._target_speed_pid._vehicle != player:
+                self._target_speed_pid = PIDLongitudinalController(player, 0.1, 0.0, 2, FIXED_DELTA_SECONDS)
+            pid_output = self._target_speed_pid.run_step(target_speed, debug=False)
+            self._control.throttle = max(0, pid_output)
+            self._control.brake = math.fabs(min(0, pid_output))
+        else:
+            self._control.throttle = max(min(float(throttle), 1), 0)
+            self._control.brake = float(brake) if brake > 0.02 else 0  # 1 if float(brake) > 0.3 else 0
 
     def _parse_vehicle_keys(self, world: World, keys: List[int], milliseconds: int):
         self._control.throttle = 1.0 if keys[K_UP] or keys[K_w] else 0.0
@@ -1103,6 +1107,8 @@ class HUD(object):
         t = world.player.get_transform()
         v = world.player.get_velocity()
         c = world.player.get_control()
+        speed_limit = world.player.get_speed_limit()
+
         heading = 'N' if abs(t.rotation.yaw) < 89.5 else ''
         heading += 'S' if abs(t.rotation.yaw) > 90.5 else ''
         heading += 'E' if 179.5 > t.rotation.yaw > 0.5 else ''
@@ -1110,7 +1116,6 @@ class HUD(object):
 
         vehicles = world.world.get_actors().filter('vehicle.*')
         speed = 3.6 * math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2)
-        speed_limit = world.player.get_speed_limit()
 
         self._info_text = [
             'Server (realtime):  % 5.0f FPS' % self.server_fps_realtime,
@@ -1127,7 +1132,8 @@ class HUD(object):
             u'Heading:% 16.0f\N{DEGREE SIGN} % 2s' % (t.rotation.yaw, heading),
             'Location:% 20s' % ('(% 5.1f, % 5.1f)' %
                                 (t.location.x, t.location.y)),
-            'Height:  % 18.0f m' % t.location.z, ''
+            'Height:  % 18.0f m' % t.location.z, '',
+            'Traffic light status: ' + str(get_traffic_light_status(world.player))
         ]
         if world._auto_record:
             self._info_text += ['Mode: Recording']
@@ -1305,8 +1311,9 @@ class HelpText(object):
 
 
 class CameraManager(object):
-    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', eval=False,
+    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History',  worldObject: World, eval=False,
                  hq_recording=False):
+        self.world = worldObject
         self.sensor = None
         self._surface = None
         self._parent = parent_actor
@@ -1355,12 +1362,35 @@ class CameraManager(object):
             item.append(bp)
         self._index = None
 
+        # Collision
+        bp = world.get_blueprint_library().find('sensor.other.collision')
+        sensor = world.spawn_actor(bp, carla.Transform(), attach_to=parent_actor)
+        weak_self = weakref.ref(self)
+        sensor.listen(lambda event: CameraManager._on_collision(weak_self, event))
+        self._recording_sensors.append(sensor)
+
+    @staticmethod
+    def _on_collision(weak_self, event):
+        self: CameraManager = weak_self()
+        if not self:
+            return
+
+        # Retry if we collide with something
+        if self._recording and not self.world._eval_mode:
+            self.world.hud.notification("Collision detected, retrying.")
+            print("Collision detected, retrying")
+            self.world.history.restart()
+            self.world.history._active = True
+            self.world.restart()
+
     def _initiate_recording(self):
 
         sensor_bp = self._parent.get_world().get_blueprint_library().find(
             'sensor.camera.rgb')
-        sensor_bp.set_attribute('image_size_x', "350")
-        sensor_bp.set_attribute('image_size_y', "160")
+        # sensor_bp.set_attribute('image_size_x', "350")
+        # sensor_bp.set_attribute('image_size_y', "160")
+        sensor_bp.set_attribute('image_size_x', "490")
+        sensor_bp.set_attribute('image_size_y', "224")
 
         sensor = self._parent.get_world().spawn_actor(
             sensor_bp,
@@ -1513,7 +1543,7 @@ class History:
         self._driving_log = None
         self._active = False
         self._latest_client_autopilot_control = None
-        self.control_type = None  # type: ControlType
+        self.control_type: ControlType = None
         self._latest_hlc = None
         self._environment = environment
         self._left_lane_change_valid = None
@@ -1528,8 +1558,8 @@ class History:
         self._driving_log = pd.DataFrame(columns=[
             "ForwardCenter", "ForwardLeft", "ForwardRight", "LeftCenter",
             "RightCenter", "Location", "Velocity", "Controls", "ClientAutopilotControls", "ControlType",
-            "LeftLaneChangeValid", "RightLaneChangeValid", "TrafficLight", "DeprecatedTrafficLight",
-            "SpeedLimit", "HLC", "Environment", "WheaterId"
+            "LeftLaneChangeValid", "RightLaneChangeValid", "NewTrafficLight", "TrafficLight",
+            "SpeedLimit", "HLC", "Environment", "WheaterId", "APTargetSpeed"
         ])
         self._timestamp = time.strftime("%Y-%m-%d_%H-%M-%S",
                                         time.localtime(time.time()))
@@ -1546,7 +1576,8 @@ class History:
 
     def update_image(self, image, position, sensor_type):
         if image.raw_data:
-            img = np.reshape(np.array(image.raw_data), (160, 350, 4))[:, :, :3]
+            # img = np.reshape(np.array(image.raw_data), (160, 350, 4))[:, :, :3]
+            img = np.reshape(np.array(image.raw_data), (224, 490, 4))[:, :, :3]
             self._latest_images[position + "_" + sensor_type] = img
 
     def update_left_lane_change_valid(self, is_valid):
@@ -1593,8 +1624,7 @@ class History:
         output_path = Path(self._output_folder + '/' + self._timestamp)
         image_path = output_path / "imgs"
 
-        light = get_nearest_traffic_light(player)[0]
-        red_light = 0 if client_ap.is_affected_by_traffic_light and light is not None and light.state != carla.TrafficLightState.Green else 1
+        green_light = get_traffic_light_status(player)
 
         deprecated_red_light = 0 if player.get_traffic_light_state() == carla.TrafficLightState.Red else 1
 
@@ -1617,13 +1647,13 @@ class History:
                 self.control_type.value,
                 1 if self._left_lane_change_valid else 0,
                 1 if self._right_lane_change_valid else 0,
-                red_light,
+                green_light,
                 deprecated_red_light,
                 player.get_speed_limit() / 3.6,
                 hlc.value,
                 self._environment.value,
-                self._weather_index
-
+                self._weather_index,
+                client_ap._target_speed
             ],
                 index=self._driving_log.columns),
             ignore_index=True)
@@ -1644,6 +1674,9 @@ class History:
         else:
             self._driving_log.to_csv(csv_path, mode="a", header=False)
 
+        self.restart()
+
+    def restart(self):
         self._active = False
         self._initiate()
 
@@ -1874,7 +1907,7 @@ class Evaluator():
         self.sensors.append(sensor)
 
     @staticmethod
-    def _on_lane_invasion(weak_self, event):
+    def _on_lane_invasion(weak_self, event: LaneInvasionEvent):
 
         self = weak_self()
         if not self:
@@ -1886,8 +1919,10 @@ class Evaluator():
         if self._in_junction or (self._exited_junction_at and self._exited_junction_at + 2 > time.time()):
             return
 
+        print("Event: ", event)
         lane_type = (str(event.crossed_lane_markings[-1].type)).lower()
-        location = event.actor.get_transform().location
+        # location = event.actor.get_transform().location
+        location = self.world.player.get_transform().location
         event_type = EventType.SIDEWALK_TOUCH if lane_type == 'none' else EventType.LANE_TOUCH
         self.error_counter[event_type.name] += 1
 
@@ -1994,8 +2029,8 @@ def game_loop(args):
     client = carla.Client(args.host, args.port)
     client.set_timeout(15.0)
 
-    client.load_world("Town01")
-    sim_world = client.get_world()  # type: carla.World
+    client.load_world("Town02")
+    sim_world: carla.World = client.get_world()
     map_name = sim_world.get_map().name
 
     # Enable synchronous mode
