@@ -18,7 +18,8 @@ from carla import World, Map, ActorList, Actor, Vehicle
 from carla.libcarla import TrafficLight
 
 from agents.navigation.local_planner import LocalPlanner
-from agents.tools.misc import is_within_distance_ahead, compute_magnitude_angle
+from agents.tools.misc import is_within_distance_ahead, compute_magnitude_angle, get_speed, get_nearest_traffic_light, \
+    get_traffic_light_status
 
 
 class AgentState(Enum):
@@ -40,12 +41,13 @@ class Agent(object):
 
         :param vehicle: actor to apply to local planner logic onto
         """
+        self.braking_initial_speed = None
         self._vehicle = vehicle
-        self._proximity_threshold = 10.0  # meters
-        self._local_planner = None  # type: LocalPlanner
-        self._world = self._vehicle.get_world()  # type: World
-        self._map = self._vehicle.get_world().get_map()  # type: Map
-        self._last_traffic_light = None  # type: Optional[TrafficLight]
+        self._proximity_threshold = 15.0  # meters
+        self._local_planner: LocalPlanner = None
+        self._world: World = self._vehicle.get_world()
+        self._map: Map = self._vehicle.get_world().get_map()
+        self._last_traffic_light: Optional[TrafficLight] = None
 
     def run_step(self, debug=False):
         """
@@ -130,6 +132,7 @@ class Agent(object):
             # It is too late. Do not block the intersection! Keep going!
             return (False, None)
 
+        """
         if self._local_planner.target_waypoint is not None:
             #if self._local_planner.target_waypoint.is_junction:
             if True:
@@ -141,11 +144,11 @@ class Agent(object):
                     magnitude, angle = compute_magnitude_angle(loc,
                                                                ego_vehicle_location,
                                                                self._vehicle.get_transform().rotation.yaw)
-                    if magnitude < self._proximity_threshold and angle < min(25.0, min_angle):
+                    if magnitude <= self.dynamic_proximity_threshold() and angle < min(25.0, min_angle):
                         sel_magnitude = magnitude
                         sel_traffic_light = traffic_light
                         min_angle = angle
-                        print("sel_traffic_light: angle=", angle, ", magnitude=", magnitude)
+                        #  print("sel_traffic_light: angle=", angle, ", magnitude=", magnitude)
                 if sel_traffic_light is not None:
                     if debug:
                         print('=== Magnitude = {} | Angle = {} | ID = {}'.format(
@@ -158,8 +161,24 @@ class Agent(object):
                         return (True, self._last_traffic_light)
                 else:
                     self._last_traffic_light = None
+        """
+        """
+        nearest_light, distance = get_nearest_traffic_light(self._vehicle)
+        if distance <= self._proximity_threshold:
+            if debug:
+                print('=== Magnitude = {} | ID = {}'.format(distance, nearest_light.id))
 
-        return (False, None)
+            self._last_traffic_light = nearest_light
+            if nearest_light.state == carla.TrafficLightState.Red:
+                return True, nearest_light
+        """
+        green_light = get_traffic_light_status(self._vehicle)
+        if green_light == 0:
+            # red light
+            return True, get_nearest_traffic_light(self._vehicle)
+
+        return False, None
+
 
     def _is_vehicle_hazard(self, vehicle_list: List[Actor]):
         """
@@ -195,10 +214,53 @@ class Agent(object):
 
             if is_within_distance_ahead(target_vehicle.get_transform(),
                                         self._vehicle.get_transform(),
-                                        self._proximity_threshold):
+                                        self.dynamic_proximity_threshold()):
                 return (True, target_vehicle)
 
         return (False, None)
+
+    def _is_pedestrian_hazard(self, pedestrian_list: List[carla.Vehicle]):
+        """
+        Check if a given vehicle is an obstacle in our way. To this end we take
+        into account the road and lane the target vehicle is on and run a
+        geometry test to check if the target vehicle is under a certain distance
+        in front of our ego vehicle.
+        WARNING: This method is an approximation that could fail for very large
+         vehicles, which center is actually on a different lane but their
+         extension falls within the ego vehicle lane.
+        :param pedestrian_list: list of potential obstacle to check
+        :return: a tuple given by (bool_flag, vehicle), where
+                 - bool_flag is True if there is a vehicle ahead blocking us
+                   and False otherwise
+                 - vehicle is the blocker object itself
+        """
+
+        ego_vehicle_location = self._vehicle.get_location()
+        ego_vehicle_waypoint = self._map.get_waypoint(ego_vehicle_location)
+
+        for target_pedestrian in pedestrian_list:
+            # do not account for the ego vehicle
+            if target_pedestrian.id == self._vehicle.id:
+                continue
+
+            # if the object is not in our lane it's not an obstacle
+            target_vehicle_waypoint = self._map.get_waypoint(target_pedestrian.get_location(), project_to_road=False)
+            if target_vehicle_waypoint is None or target_vehicle_waypoint.road_id != ego_vehicle_waypoint.road_id or \
+                    target_vehicle_waypoint.lane_id != ego_vehicle_waypoint.lane_id:
+                continue
+
+            if is_within_distance_ahead(target_pedestrian.get_transform(),
+                                        self._vehicle.get_transform(),
+                                        self.dynamic_proximity_threshold(), 18.0):
+                return (True, target_pedestrian)
+
+        return (False, None)
+
+    def dynamic_proximity_threshold(self) -> float:
+        CLEARING_IN_SECONDS = 2.0
+        speed = self.braking_initial_speed if self.braking_initial_speed is not None else get_speed(self._vehicle)  # type: float
+        self.braking_initial_speed = speed
+        return min(20, max(self._proximity_threshold, CLEARING_IN_SECONDS * speed / 3.6))
 
     def emergency_stop(self):
         """

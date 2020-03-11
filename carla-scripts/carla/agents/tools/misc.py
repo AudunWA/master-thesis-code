@@ -44,10 +44,10 @@ def get_speed(vehicle):
     return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
 
 
-def is_within_distance_ahead(target_transform, current_transform, max_distance):
+def is_within_distance_ahead(target_transform, current_transform, max_distance, max_degrees=90.0):
     """
     Check if a target object is within a certain distance in front of a reference object.
-
+    :param max_degrees: maximum allowed angle between the target object and the forward vector of current_transform
     :param target_transform: location of the target object
     :param current_transform: location of the reference object
     :param orientation: orientation of the reference object
@@ -69,7 +69,7 @@ def is_within_distance_ahead(target_transform, current_transform, max_distance):
     forward_vector = np.array([fwd.x, fwd.y])
     d_angle = math.degrees(math.acos(np.clip(np.dot(forward_vector, target_vector) / norm_target, -1., 1.)))
 
-    return d_angle < 90.0
+    return d_angle < max_degrees
 
 
 def compute_magnitude_angle(target_location, current_location, orientation):
@@ -89,6 +89,7 @@ def compute_magnitude_angle(target_location, current_location, orientation):
 
     return (norm_target, d_angle)
 
+
 def compute_magnitude_angle_new(target_location, current_location, target_orientation, current_orientation):
     """
     Compute relative angle and distance between a target_location and a current_location
@@ -105,9 +106,11 @@ def compute_magnitude_angle_new(target_location, current_location, target_orient
     target_rotation_as_vector = np.array([x, z])
 
     norm_target = np.linalg.norm(target_vector)
-    forward_vector = np.array([math.cos(math.radians(current_orientation)), math.sin(math.radians(current_orientation))])
+    forward_vector = np.array(
+        [math.cos(math.radians(current_orientation)), math.sin(math.radians(current_orientation))])
 
-    d_angle = math.degrees(math.acos(np.clip(np.dot(target_rotation_as_vector, target_vector) / (norm_target*1), -1., 1.)))
+    d_angle = math.degrees(
+        math.acos(np.clip(np.dot(target_rotation_as_vector, target_vector) / (norm_target * 1), -1., 1.)))
 
     return (norm_target, d_angle)
 
@@ -188,11 +191,13 @@ def get_nearest_traffic_light(vehicle: carla.Vehicle) -> Tuple[
     for traffic_light in lights_list:
         loc = traffic_light.get_location()
         distance_to_light, angle = compute_magnitude_angle(loc,
-                                                   ego_vehicle_location,
-                                                   vehicle.get_transform().rotation.yaw)
-        rotation_diff = math.fabs(vehicle.get_transform().rotation.yaw - (traffic_light.get_transform().rotation.yaw - 90))
+                                                           ego_vehicle_location,
+                                                           vehicle.get_transform().rotation.yaw)
 
-        if distance_to_light < closest_traffic_light_distance and angle < 90 and rotation_diff < 30:
+        rotation_diff = math.fabs(
+            vehicle.get_transform().rotation.yaw - (traffic_light.get_transform().rotation.yaw - 90))
+
+        if distance_to_light < closest_traffic_light_distance and angle < 90 and (rotation_diff < 30 or math.fabs(360 - rotation_diff) < 30):
             closest_traffic_light_distance = distance_to_light
             closest_traffic_light = traffic_light
             min_angle = angle
@@ -201,3 +206,13 @@ def get_nearest_traffic_light(vehicle: carla.Vehicle) -> Tuple[
     # if closest_traffic_light is not None:
     #     print("Ego rot: ", vehicle.get_transform().rotation.yaw, "TL rotation: ", closest_traffic_light.get_transform().rotation.yaw, ", diff: ", min_rotation_diff, ", dist: ", closest_traffic_light_distance)
     return closest_traffic_light, closest_traffic_light_distance
+
+
+def get_traffic_light_status(player: carla.Vehicle):
+    light, distance = get_nearest_traffic_light(player)
+    green_light = 0 if \
+        distance <= 20 \
+        and light is not None \
+        and light.state != carla.TrafficLightState.Green \
+        else 1
+    return green_light

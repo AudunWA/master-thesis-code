@@ -121,7 +121,6 @@ class LSTMKeras(ModelInterface):
             float(info["speed_limit"] * 3.6 / 30 - 1),
             info["traffic_light"]
         ]
-        print("Traffic light", info_input[2])
 
         hlc_input = self.hlc_one_hot[info["hlc"].value]
         environment_input = self.environment_one_hot[info["environment"].value]
@@ -157,33 +156,41 @@ class LSTMKeras(ModelInterface):
                 "environment_input": environments
             })
 
-            steer, throttle = prediction[0][0], prediction[1][0][0]
-            if len(prediction) == 3:
-                brake = prediction[2][0][0]
-            else:
-                brake = 0
-
-            self.brake_hist.append(brake)
-            avg_brake = np.max(self.brake_hist)
-            step_brake = 1 if avg_brake > 0.3 else 0
-            #step_brake = brake  # avg_brake  # 1 if avg_brake > 0.5 else 0
-
-            if len(self.brake_hist) > 7:
-                self.brake_hist.pop(0)
-
+            steer = prediction[0][0]
+            steer_angle = steer[0]
             if self.sine_steering:
                 steer_curve_parameters = curve_fit(encoder, np.arange(1, 11, 1), steer)[0]
                 steer_angle = steer_curve_parameters[0]
-                self._last_pred = (steer_angle, throttle, step_brake)
-                print("Steer (sine): ", steer_angle, ", throttle: ", throttle, ", brake: ", brake)
+
+            # Target speed
+            if len(prediction) == 2:
+                target_speed = prediction[1][0][0] * 100.0
+                if target_speed < 4:
+                    target_speed = 0
+                self._last_pred = (steer_angle, 0, 0, target_speed)
+                print("Steer: ", steer_angle, ", target speed: ", target_speed)
             else:
-                steer = steer[0]
-                self._last_pred = (steer, throttle, step_brake)
-                print("Steer: ", steer, ", throttle: ", throttle, ", brake: ", brake)
+                throttle = prediction[0][0], prediction[1][0][0]
+                if len(prediction) == 3:
+                    brake = prediction[2][0][0]
+                else:
+                    brake = 0
+
+                self.brake_hist.append(brake)
+                avg_brake = np.max(self.brake_hist)
+                step_brake = 1 if avg_brake > 0.3 else 0
+                #step_brake = brake  # avg_brake  # 1 if avg_brake > 0.5 else 0
+                #step_brake = avg_brake  # 1 if avg_brake > 0.5 else 0
+
+                if len(self.brake_hist) > 7:
+                    self.brake_hist.pop(0)
+
+                self._last_pred = (steer_angle, throttle, step_brake, None)
+                print("Steer: ", steer_angle, ", throttle: ", throttle, ", brake: ", brake)
 
             return self._last_pred
 
-        return (0, 0.5, 0)
+        return 0, 0.5, 0, None
 
 
 class CNNKeras(ModelInterface):

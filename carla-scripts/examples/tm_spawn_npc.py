@@ -55,6 +55,10 @@ def main():
         action='store_true',
         help='avoid spawning vehicles prone to accidents')
     argparser.add_argument(
+        '--hegemax',
+        action='store_true',
+        help='avoid spawning vehicles not spawned in Hege-Max')
+    argparser.add_argument(
         '--filterv',
         metavar='PATTERN',
         default='vehicle.*',
@@ -85,6 +89,13 @@ def main():
             blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
             blueprints = [x for x in blueprints if not x.id.endswith('carlacola')]
 
+        if args.hegemax:
+            blueprints = [x for x in blueprints if int(x.get_attribute('number_of_wheels')) == 4]
+            blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
+            blueprints = [x for x in blueprints if not x.id.endswith('carlacola')]
+            blueprints = [x for x in blueprints if not x.id.endswith('t2')]
+            blueprints = [x for x in blueprints if not x.id.endswith('coupe')]
+
         spawn_points = world.get_map().get_spawn_points()
         number_of_spawn_points = len(spawn_points)
 
@@ -101,13 +112,27 @@ def main():
         # --------------
         # Spawn vehicles
         # --------------
-
+        bad_colors = [
+            "255,255,255", "183,187,162", "237,237,237",
+            "134,134,134", "243,243,243", "127,130,135",
+            "109,109,109", "181,181,181", "140,140,140",
+            "181,178,124", "171,255,0", "251,241,176",
+            "158,149,129", "233,216,168", "233,216,168",
+            "108,109,126", "193,193,193", "227,227,227",
+            "151,150,125", "206,206,206", "255,222,218",
+            "211,211,211", "191,191,191"
+        ]
         for n, transform in enumerate(spawn_points):
             if n >= args.number_of_vehicles:
                 break
             blueprint = random.choice(blueprints)
             if blueprint.has_attribute('color'):
-                color = random.choice(blueprint.get_attribute('color').recommended_values)
+                if args.hegemax:
+                    color = "255,255,255"
+                    while color in bad_colors:
+                        color = random.choice(blueprint.get_attribute('color').recommended_values)
+                else:
+                    color = random.choice(blueprint.get_attribute('color').recommended_values)
                 blueprint.set_attribute('color', color)
             if blueprint.has_attribute('driver_id'):
                 driver_id = random.choice(blueprint.get_attribute('driver_id').recommended_values)
