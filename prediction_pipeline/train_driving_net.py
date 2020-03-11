@@ -545,28 +545,29 @@ def get_segmentation_model(model_type, freeze=False):
 
     elif model_type == "seven_class_trained":
         segmentation_model = model_from_checkpoint_path(seven_class_checkpoints_path)
-        print(segmentation_model.summary())
 
         x = segmentation_model.get_layer("conv2d_6").output
 
 
     elif model_type == "pretrained":
         segmentation_model = pspnet_101_cityscapes()
-        print(segmentation_model.summary())
         x = segmentation_model.get_layer("conv6").output
 
     elif model_type == "seven_class_vanilla_psp":
         segmentation_model = custom_model_from_checkpoint_path(seven_class_vanilla_psp_path)
+
+        print("seven_class_vanilla_psp")
+        print(segmentation_model.summary())
         x = get_layer_with_name(segmentation_model, "average_pooling2d_1").output
 
     elif model_type == "seven_class_mobile":
         segmentation_model = model_from_checkpoint_path(seven_class_mobile_checkpoints_path)
         output_layer = get_layer_with_name(segmentation_model, "conv_dw_6_relu")
+
         x = output_layer.output
 
     elif model_type == "resnet50_pspnet_8_classes":
         segmentation_model = model_from_checkpoint_path(resnet50_pspnet_8_classes)
-        segmentation_model.summary()
         output_layer = segmentation_model.get_layer(name="conv2d_6")
         x = output_layer.output
 
@@ -728,11 +729,11 @@ adjust_hlc = False
 
 epochs_list = [100]
 
-dataset_folders_lists = [["cleaned_rain_traffic", "cleaned_clear_traffic"]]
+dataset_folders_lists = [["easy_traffic_lights_rain"]]
 
 steering_corrections = [0.05]
 
-batch_sizes = [64]
+batch_sizes = [16]
 
 sampling_intervals = [3]
 

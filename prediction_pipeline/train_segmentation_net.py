@@ -18,7 +18,7 @@ data_folder = Path('data/segmentation_data')
 def get_segmentation_depth_model(num_classes):
 
     print("get_segmentation_depth_model")
-    model = pspnet(num_classes, input_height=192, input_width=192)
+    model = pspnet(num_classes, input_height=512, input_width=1024)
     print(model.summary())
     plot_model(model, "model.png")
 
@@ -92,7 +92,7 @@ def print_model_summary():
 
 
 #train_segmentation_model(num_classes=8)
-train_resnet_50_psp(num_classes=8)
+train_segmentation_model(num_classes=8)
 
 import os, shutil
 """

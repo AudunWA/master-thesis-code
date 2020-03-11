@@ -155,7 +155,7 @@ def copy_cityscapes_files(input_path, output_path, only_matching=None):
 train_cropped_segmentations = data_folder / "output_cropped_train"
 validation_cropped_segmentations = data_folder / "output_cropped_val"
 
-"""
+
 # Prepare original images for train and validation
 crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/training/images/", data_folder / "images_prepped_train")
 crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/validation/images/", data_folder / "images_prepped_val")
@@ -179,7 +179,7 @@ crop_and_resize("/home/audun/monodepth2/train_depth_np/", train_cropped_segmenta
 crop_and_resize("/home/audun/monodepth2/val_depth_np/", validation_cropped_segmentations)
 
 
-"""
+
 #copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/train", data_folder / "cityscapes_images")
 #copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/val", data_folder / "cityscapes_images")
 #copy_cityscapes_files("/media/audun/Storage/leftImg8bit_trainextra/leftImg8bit/train_extra", data_folder / "cityscapes_images")
