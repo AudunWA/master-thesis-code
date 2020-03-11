@@ -148,8 +148,12 @@ def copy_cityscapes_files(input_path, output_path, only_matching=None):
             if only_matching is not None:
                 if not only_matching in filename:
                     continue
-            output_name = str(output_path) + "/" + str(filename).replace(".png", str(folder + filename))
+            output_name = str(output_path) + "/" + str(folder + str(filename))
+
             copyfile(str(input_path / folder / filename), output_name)
+
+train_cropped_segmentations = data_folder / "output_cropped_train"
+validation_cropped_segmentations = data_folder / "output_cropped_val"
 
 """
 # Prepare original images for train and validation
@@ -158,8 +162,6 @@ crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/vali
 
 # Prepare original segmentations for further processing
 
-train_cropped_segmentations = data_folder / "output_cropped_train"
-validation_cropped_segmentations = data_folder / "output_cropped_val"
 
 crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/training/labels/", train_cropped_segmentations)
 crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/validation/labels/", validation_cropped_segmentations)
@@ -179,12 +181,19 @@ crop_and_resize("/home/audun/monodepth2/val_depth_np/", validation_cropped_segme
 
 """
 #copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/train", data_folder / "cityscapes_images")
-#copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/test", data_folder / "cityscapes_images")
 #copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/val", data_folder / "cityscapes_images")
-#copy_cityscapes_files("/home/audun/Downloads/leftImg8bit_trainvaltest/leftImg8bit/val", data_folder / "cityscapes_images")
+#copy_cityscapes_files("/media/audun/Storage/leftImg8bit_trainextra/leftImg8bit/train_extra", data_folder / "cityscapes_images")
 
 #copy_cityscapes_files("/home/audun/Downloads/gtCoarse/gtCoarse/train", data_folder / "cityscapes_labels", only_matching="color")
 #copy_cityscapes_files("/home/audun/Downloads/gtCoarse/gtCoarse/val", data_folder / "cityscapes_labels", only_matching="color")
 #copy_cityscapes_files("/home/audun/Downloads/gtCoarse/gtCoarse/train_extra", data_folder / "cityscapes_labels", only_matching="color")
 
-#convert_cityscape_segm_images("output_cropped_train", "segm_annotations_prepped_train")
+#crop_and_resize(str(data_folder / "cityscapes_images") + "/", data_folder / "cityscapes_images_prepped_train")
+
+#crop_and_resize(str(data_folder / "cityscapes_labels") + "/", train_cropped_segmentations)
+
+convert_cityscape_segm_images("output_cropped_train", "cityspaces_segm_annotations_prepped_train")
+
+#crop_and_resize("/media/audun/Storage/trainextra_depth/", data_folder / "cityscapes_depth_annotations_prepped_train")
+#crop_and_resize("/media/audun/Storage/train_depth/", data_folder / "cityscapes_depth_annotations_prepped_train")
+#crop_and_resize("/media/audun/Storage/val_depth/", data_folder / "cityscapes_depth_annotations_prepped_train")

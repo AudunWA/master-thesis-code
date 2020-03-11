@@ -13,20 +13,22 @@ import time
 from keras.backend import tf
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.engine.saving import load_model
-from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, CuDNNLSTM
+from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, CuDNNLSTM, Activation, BatchNormalization
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.utils import Sequence
 from keras_segmentation.data_utils.data_loader import get_image_array
 from keras_segmentation.models.pspnet import pspnet_50
+from keras_segmentation.pretrained import pspnet_101_cityscapes
 from keras_segmentation.predict import model_from_checkpoint_path
 from pathlib import Path
 from typing import Tuple, List
+from prediction_pipeline.utils.pspnet import model_from_checkpoint_path as custom_model_from_checkpoint_path
 
 three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
-seven_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_seven"
+seven_class_checkpoints_path = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
 seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
-seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
+seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-26_12-00-11/pspnet_8_classes"
 
 checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
 
@@ -553,15 +555,18 @@ def get_segmentation_model(model_type, freeze=True):
 
     elif model_type == "seven_class_trained":
         segmentation_model = model_from_checkpoint_path(seven_class_checkpoints_path)
-        x = segmentation_model.layers[-4].output
+        print(segmentation_model.summary())
+
+        x = segmentation_model.get_layer("conv2d_6").output
 
 
     elif model_type == "pretrained":
-        segmentation_model = pspnet_50()
-        x = segmentation_model.layers[-4].output
+        segmentation_model = pspnet_101_cityscapes()
+        print(segmentation_model.summary())
+        x = segmentation_model.get_layer("conv6").output
 
     elif model_type == "seven_class_vanilla_psp":
-        segmentation_model = model_from_checkpoint_path(seven_class_vanilla_psp_path)
+        segmentation_model = custom_model_from_checkpoint_path(seven_class_vanilla_psp_path)
         x = get_layer_with_name(segmentation_model, "average_pooling2d_1").output
 
     elif model_type == "seven_class_mobile":
@@ -582,19 +587,24 @@ def get_segmentation_model(model_type, freeze=True):
     return model_new
 
 
-def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_vanilla_psp", print_summary=True):
-    forward_image_input = Input(shape=(seq_length, 224, 224, 3), name="forward_image_input")
+def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_trained", print_summary=True):
+    forward_image_input = Input(shape=(seq_length, 384, 576, 3), name="forward_image_input")
     hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
     info_input = Input(shape=(seq_length, 3), name="info_input")
 
     segmentation_model = get_segmentation_model(segm_model)
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
+    segmentation_output = BatchNormalization()(segmentation_output)
+    segmentation_output = Activation(activation="relu")(segmentation_output)
 
     x = concatenate([segmentation_output, hlc_input, info_input])
 
-    x = TimeDistributed(Dense(100, activation="relu"))(x)
-
-    x = CuDNNLSTM(10, return_sequences=False)(x)
+    x = Flatten()(x)
+    #x = TimeDistributed(Dense(100, activation="relu"))(x)
+    #x = CuDNNLSTM(10, return_sequences=False)(x)
+    x = Dense(100, activation="relu")(x)
+    #x = Dense(50, activation="relu")(x)
+    #x = Dense(10, activation="relu")(x)
     steer_dim = 1 if not sine_steering else 10
     steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(x)
 
@@ -642,11 +652,11 @@ class generator(Sequence):
         if not self.validation:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 224, 224, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, 576, 384, imgNorm="sub_mean", ordering='channels_last') for image in seq])
         else:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 224, 224, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, 576, 384, imgNorm="sub_mean", ordering='channels_last') for image in seq])
 
         return {
                    "forward_image_input": np.array(forward_imgs),
@@ -667,7 +677,7 @@ adjust_hlc = False
 
 epochs_list = [100]
 
-dataset_folders_lists = [["Town01_simple_noise"]]
+dataset_folders_lists = [["cleaned_rain_traffic", "cleaned_clear_traffic"]]
 
 steering_corrections = [0.05]
 
@@ -675,7 +685,7 @@ batch_sizes = [64]
 
 sampling_intervals = [3]
 
-seq_lengths = [5]
+seq_lengths = [1]
 
 sine_steering_list = [True, False]
 
@@ -694,15 +704,10 @@ parameter_permutations = itertools.product(epochs_list,
                                            balance_data_list,
                                            use_side_cameras_list)
 
-# Train a new model for each parameter permutation, and save the best models
-model_name = input("Name of model test: ").strip()
-segmentation_model_name = "seven_class_vanilla_psp"
-
-parameter_permutations_list = [p for p in parameter_permutations]
 
 
 def build_or_load_model(model_name: str, seq_length: int, sampling_interval: int, sine_steering: bool,
-                        segmentation_model_name: str, use_side_cameras: bool) -> Tuple[
+                        segmentation_model_name: str, use_side_cameras: bool, parameters_string: str) -> Tuple[
     Model, Path, configparser.ConfigParser]:
     model_candidates = sorted(glob("data/driving_models/" + model_name + "/*/*.h5"), reverse=True)
 
@@ -715,7 +720,7 @@ def build_or_load_model(model_name: str, seq_length: int, sampling_interval: int
             config = configparser.ConfigParser()
             config.read(model_folder / "config.ini")
             return load_model(model_path, compile=True,
-                              custom_objects={"custom": root_mean_squared_error}), model_folder, config
+                              custom_objects={"custom": root_mean_squared_error, "root_mean_squared_error": root_mean_squared_error}), model_folder, config
 
     # Prepare for logging
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
@@ -749,31 +754,31 @@ def build_or_load_model(model_name: str, seq_length: int, sampling_interval: int
     model.compile(loss=[steer_loss(), mean_squared_error, mean_squared_error], optimizer=Adam())
     return model, path, config
 
+# Train a new model for each parameter permutation, and save the best models
+model_name = input("Name of model test: ").strip()
+segmentation_model_name = "seven_class_trained"
+
+parameter_permutations_list = [p for p in parameter_permutations]
 
 for parameters in parameter_permutations_list:
     # Get parameters
     epochs, dataset_folders, steering_correction, batch_size, sampling_interval, seq_length, sine_steering, balance_data, use_side_cameras = parameters
+
+    # town1_dataset_folders, town4_dataset_folders = dataset_folders
     parameters_string = (
         "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\nuse_side_cameras:\t\t{}\n\n"
             .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
                     sampling_interval, seq_length, use_side_cameras))
 
-    # town1_dataset_folders, town4_dataset_folders = dataset_folders
-
     # Get model
     model, path, config = build_or_load_model(model_name, seq_length, sampling_interval, sine_steering,
-                                              segmentation_model_name, use_side_cameras)
+                                              segmentation_model_name, use_side_cameras, parameters_string)
     model_config = config["ModelConfig"]
     seq_length = int(model_config["sequence_length"])
     sampling_interval = int(model_config["sampling_interval"])
     sine_steering = bool(model_config.get("sine_steering", True))
-    segmentation_model_name = model_config.get("segmentation_model_name", "seven_class_vanilla_psp")
     use_side_cameras = bool(model_config.get("use_side_cameras", False))
 
-    parameters_string = (
-        "epochs:\t\t\t{}\ndataset folders:\t{}\nsteering correction:\t{}\nbatch size:\t\t{}\nbalance:\t\t{}\nsine_steer:\t\t{}\nsampling interval:\t{}\nseq lenght: \t\t{}\nuse_side_cameras:\t\t{}\n\n"
-            .format(epochs, str(dataset_folders), steering_correction, batch_size, balance_data, sine_steering,
-                    sampling_interval, seq_length, use_side_cameras))
 
     checkpoint_val = ModelCheckpoint(
         str(path / (
