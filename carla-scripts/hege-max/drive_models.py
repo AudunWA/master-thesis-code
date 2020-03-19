@@ -112,7 +112,7 @@ class LSTMKeras(ModelInterface):
             return False
         req = (self.sequence_length - 1) * (self._sampling_interval + 1) + 1
 
-        img_center = get_image_array(images["forward_center_rgb"], 224, 224, imgNorm="sub_mean",
+        img_center = get_image_array(images["forward_center_rgb"], height=self.height, width=self.width, imgNorm="sub_mean",
                                      ordering='channels_last')
         """img_left = cv2.cvtColor(images["left_center_rgb"], cv2.COLOR_BGR2LAB)
         img_right = cv2.cvtColor(images["right_center_rgb"], cv2.COLOR_BGR2LAB)"""
