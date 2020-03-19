@@ -344,7 +344,7 @@ def model_from_checkpoint_path(checkpoints_path):
     model = pspnet(
         model_config['n_classes'], input_height=model_config['input_height'],
         input_width=model_config['input_width'])
-    print(model.summary())
+    model.summary()
     model.load_weights(latest_weights)
     return model
 
