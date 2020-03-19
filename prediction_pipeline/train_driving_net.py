@@ -13,10 +13,12 @@ import time
 from keras.backend import tf
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.engine.saving import load_model
-from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, BatchNormalization, Activation
+from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, BatchNormalization, Activation, CuDNNLSTM, \
+    Dropout, Lambda, Conv2D
+
 from keras.models import Model
 from keras.optimizers import Adam
-from keras.utils import Sequence
+from keras.utils import Sequence, plot_model
 from keras_segmentation.data_utils.data_loader import get_image_array
 from keras_segmentation.pretrained import pspnet_101_cityscapes
 from keras_segmentation.predict import model_from_checkpoint_path
@@ -27,7 +29,8 @@ from prediction_pipeline.utils.pspnet import model_from_checkpoint_path as custo
 three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
 seven_class_checkpoints_path = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
 seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
-seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-26_12-00-11/pspnet_8_classes"
+seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
+seven_class_vanilla_psp_depth_path = "data/segmentation_models/pspnet_8_classes/2020-02-26_12-00-11/pspnet_8_classes"
 resnet50_pspnet_8_classes = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
 
 checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
@@ -126,15 +129,54 @@ def split_dict(dictionary, split_pos):
     return train_dict, val_dict
 
 
+def adjust_hlcs(hlcs, info_signals):
+    """
+    Randomly adjust HLC backwards,
+    such that the HLC data is given before the car is in the intersection
+    """
+
+    # Iterate over all episodes
+    for e in range(len(hlcs)):
+        active_change_hlc = None
+        changed = 0
+        adjust_num = random.randint(20, 40)
+        # Iterate over all hlcs in episode
+        for i in range(len(hlcs[e]) - 2, -1, -1):
+            next_hlc = np.argmax(hlcs[e][i + 1]) + 1
+            current_hlc = np.argmax(hlcs[e][i]) + 1
+            if active_change_hlc == False:
+                active_change_hlc = None
+                continue
+
+            if active_change_hlc is None:
+                if next_hlc == 1 or next_hlc == 2 or next_hlc == 3:
+                    if current_hlc == 4:
+                        active_change_hlc = hlcs[e][i + 1]
+            if active_change_hlc is not None:
+                hlcs[e][i] = active_change_hlc
+                if info_signals[e][i][2] != 0:
+                    changed += 1
+                if changed == adjust_num:
+                    active_change_hlc = False
+                    changed = 0
+    return hlcs
+
+
 #### BALANCING DATA - Helper functions ####
 def get_hlc_dist_label(hlc):
     " Get distributions of HLC in data "
-    if hlc == 0:
+    if hlc == 1:
         return "left"
     elif hlc == 2:
         return "right"
-    elif hlc == 1:
+    elif hlc == 3:
         return "straight"
+    elif hlc == 4:
+        return "follow_lane"
+    elif hlc == 5:
+        return "change_lane_left"
+    elif hlc == 6:
+        return "change_lane_right"
 
 
 def get_speed_dist_label(speed):
@@ -376,6 +418,7 @@ def get_dist(inputs, targets):
             "left": 0,
             "right": 0,
             "straight": 0,
+            "follow_lane": 0,
         },
         "steering": {
             "left": 0,  # More than 20 deg left
@@ -395,13 +438,8 @@ def get_dist(inputs, targets):
 
         # Iterate over all HLC in sequence
         for hlc in hlcs:
-            hlc_value = np.argmax(hlc)
-            if hlc_value == 0:
-                dist["hlc"]["left"] += 1
-            elif hlc_value == 1:
-                dist["hlc"]["straight"] += 1
-            elif hlc_value == 2:
-                dist["hlc"]["right"] += 1
+            hlc_value = np.argmax(hlc) + 1
+            dist["hlc"][get_hlc_dist_label(hlc_value)] += 1
 
     # Speed distribution
     for speed in targets["target_speed"]:
@@ -465,6 +503,48 @@ def balance_steering_angle(inputs, targets, dist, target_straight_fraction):
     return inputs_bal, targets_bal
 
 
+def balance_hlc(inputs, targets, dist):
+    """ Balance HLCs such that target fraction is correct """
+
+    # Find the steering with least amount of values
+    least_vals = min(dist["hlc"]["straight"], dist["hlc"]["left"], dist["hlc"]["right"], dist["hlc"]["follow_lane"])
+
+    inputs_bal = create_input_dict()
+    targets_bal = create_target_dict()
+
+    left_count = 0
+    right_count = 0
+    straight_count = 0
+    follow_lane_count = 0
+
+    for i in range(len(inputs["hlcs"])):
+        hlc = np.argmax(inputs["hlcs"][i]) + 1
+        if hlc == 1:
+            if left_count >= least_vals:
+                continue
+            left_count += 1
+        elif hlc == 2:
+            if right_count >= least_vals:
+                continue
+            right_count += 1
+        elif hlc == 3:
+            if straight_count >= least_vals:
+                continue
+            straight_count += 1
+        elif hlc == 4:
+            if follow_lane_count >= least_vals:
+                continue
+            follow_lane_count += 1
+
+        # Keep
+        for key in inputs_bal:
+            inputs_bal[key].append(inputs[key][i])
+        for key in targets_bal:
+            targets_bal[key].append(targets[key][i])
+
+    return inputs_bal, targets_bal
+
+
 def balance_data_lstm(inputs, targets, straight_angle_frac=0.2):
     """ Balance dataset for LSTM data """
     print("Balancing data:")
@@ -477,9 +557,16 @@ def balance_data_lstm(inputs, targets, straight_angle_frac=0.2):
     targets_bal = targets
     dist_bal = dist
 
+    """
     # Balance steering angle
     print("   - Balancing steering angle")
     inputs_bal, targets_bal = balance_steering_angle(inputs_bal, targets_bal, dist_bal, straight_angle_frac)
+    dist_bal = get_dist(inputs_bal, targets_bal)
+    print("dist_bal: ", dist_bal)
+    """
+
+    print("   - Balancing HLCs")
+    inputs_bal, targets_bal = balance_hlc(inputs_bal, targets_bal, dist_bal)
     dist_bal = get_dist(inputs_bal, targets_bal)
     print("dist_bal: ", dist_bal)
 
@@ -537,7 +624,7 @@ def get_layer_with_name(model, name):
             return layer
 
 
-def get_segmentation_model(model_type, freeze=False):
+def get_segmentation_model(model_type, freeze=True):
     x = None
     segmentation_model = None
     if model_type == "three_class_trained":
@@ -554,11 +641,8 @@ def get_segmentation_model(model_type, freeze=False):
         x = segmentation_model.get_layer("conv6").output
 
     elif model_type == "seven_class_vanilla_psp":
-        segmentation_model = custom_model_from_checkpoint_path(seven_class_vanilla_psp_path)
-
-        print("seven_class_vanilla_psp")
-        print(segmentation_model.summary())
-        x = get_layer_with_name(segmentation_model, "average_pooling2d_1").output
+        segmentation_model = model_from_checkpoint_path(seven_class_vanilla_psp_path)
+        x = segmentation_model.get_layer("activation_10").output
 
     elif model_type == "seven_class_mobile":
         segmentation_model = model_from_checkpoint_path(seven_class_mobile_checkpoints_path)
@@ -571,8 +655,8 @@ def get_segmentation_model(model_type, freeze=False):
         output_layer = segmentation_model.get_layer(name="conv2d_6")
         x = output_layer.output
 
-    x = Flatten()(x)
 
+    plot_model(segmentation_model, "segmentation_model.png", show_shapes=True)
     # Explicitly define new model input and output by slicing out old model layers
     model_new = Model(inputs=segmentation_model.layers[0].input,
                       outputs=x)
@@ -585,29 +669,33 @@ def get_segmentation_model(model_type, freeze=False):
 
 
 def get_lstm_model(seq_length, sine_steering=False, segm_model="seven_class_trained", print_summary=True):
-    forward_image_input = Input(shape=(seq_length, 384, 576, 3), name="forward_image_input")
     hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
     info_input = Input(shape=(seq_length, 3), name="info_input")
 
     segmentation_model = get_segmentation_model(segm_model)
+    [_, height, width, _] = segmentation_model.input.shape.dims
+    forward_image_input = Input(shape=(seq_length, height.value, width.value, 3), name="forward_image_input")
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
-    segmentation_output = BatchNormalization()(segmentation_output)
-    segmentation_output = Activation(activation="relu")(segmentation_output)
+    segmentation_output = TimeDistributed(Flatten())(segmentation_output)
+
+    # segmentation_output = Dropout(0.1)(segmentation_output)
+    # segmentation_output = BatchNormalization()(segmentation_output)
+    # segmentation_output = Activation(activation="relu")(segmentation_output)
 
     x = concatenate([segmentation_output, hlc_input, info_input])
+    # x = Dropout(0.2)(x)
 
-    x = Flatten()(x)
-    #x = TimeDistributed(Dense(100, activation="relu"))(x)
-    #x = CuDNNLSTM(10, return_sequences=False)(x)
-    x = Dense(100, activation="relu")(x)
-    #x = Dense(50, activation="relu")(x)
-    #x = Dense(10, activation="relu")(x)
+    x = TimeDistributed(Dense(100, activation="relu"))(x)
+    x = concatenate([x, hlc_input])
+    x = CuDNNLSTM(10, return_sequences=False)(x)
+    hlc_latest = Lambda(lambda x: x[:, -1, :])(hlc_input)
+    x = concatenate([x, hlc_latest])
+
     steer_dim = 1 if not sine_steering else 10
     steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(x)
 
     target_speed_pred = Dense(1, name="target_speed_pred", activation="sigmoid")(x)
     model = Model(inputs=[forward_image_input, hlc_input, info_input], outputs=[steer_pred, target_speed_pred])
-    model.summary()
 
     if print_summary:
         model.summary()
@@ -648,12 +736,11 @@ class generator(Sequence):
         if not self.validation:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 576, 384, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, 192, 192, imgNorm="sub_mean", ordering='channels_last') for image in seq])
         else:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 576, 384, imgNorm="sub_mean", ordering='channels_last') for image in seq])
-
+                    [get_image_array(image, 192, 192, imgNorm="sub_mean", ordering='channels_last') for image in seq])
 
         return {
                    "forward_image_input": np.array(forward_imgs),
@@ -688,7 +775,8 @@ def build_or_load_model(
         config = configparser.ConfigParser()
         config.read(model_folder / "config.ini")
         return load_model(model_path, compile=True,
-                          custom_objects={"custom": root_mean_squared_error}), model_folder, config, initial_epoch
+                          custom_objects={"custom": root_mean_squared_error,
+                                          "root_mean_squared_error": root_mean_squared_error}), model_folder, config, initial_epoch
     else:
         # Prepare for logging
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
@@ -715,17 +803,18 @@ def build_or_load_model(
             config.write(configfile)
 
         # Build model
-        model = get_lstm_model(seq_length, print_summary=False, sine_steering=sine_steering,
+        model = get_lstm_model(seq_length, print_summary=True, sine_steering=sine_steering,
                                segm_model=segmentation_model_name)
 
         # Compile model
         model.compile(loss=[steer_loss(), mean_squared_error], optimizer=Adam())
+        plot_model(model, str(path / "driving_model.png"), show_shapes=True)
         return model, path, config, 0
 
 
 # Parameters
 val_split = 0.8
-adjust_hlc = False
+adjust_hlc = True
 
 epochs_list = [100]
 
@@ -733,15 +822,15 @@ dataset_folders_lists = [["easy_traffic_lights_rain"]]
 
 steering_corrections = [0.05]
 
-batch_sizes = [16]
+batch_sizes = [8]
 
 sampling_intervals = [3]
 
-seq_lengths = [1]
+seq_lengths = [5]
 
 sine_steering_list = [True]
 
-balance_data_list = [False]
+balance_data_list = [True]
 
 use_side_cameras_list = [True]
 
@@ -759,9 +848,6 @@ parameter_permutations = itertools.product(epochs_list,
                                            use_side_cameras_list,
                                            segmentation_model_name_list)
 
-
-
-
 # Train a new model for each parameter permutation, and save the best models
 model_name = input("Name of model test: ").strip()
 parameter_permutations_list = [p for p in parameter_permutations]
@@ -776,7 +862,8 @@ for parameters in parameter_permutations_list:
                     sampling_interval, seq_length, use_side_cameras))
 
     model, path, config, initial_epoch = build_or_load_model(model_name, seq_length, sampling_interval, sine_steering,
-                                                             segmentation_model_name, use_side_cameras, parameters_string)
+                                                             segmentation_model_name, use_side_cameras,
+                                                             parameters_string)
 
     # We only use the most essential parameters if we resume training,
     # as we may want to continue training with other params.
@@ -785,7 +872,6 @@ for parameters in parameter_permutations_list:
     sampling_interval = int(model_config["sampling_interval"])
     sine_steering = bool(model_config.get("sine_steering", True))
     use_side_cameras = bool(model_config.get("use_side_cameras", False))
-
 
     checkpoint_val = ModelCheckpoint(
         str(path / (
@@ -796,6 +882,12 @@ for parameters in parameter_permutations_list:
     # Load drive logs and paths
     inputs, targets = load_driving_logs(dataset_folders, use_side_cameras, steering_correction)
 
+    # Adjust hlcs
+    if adjust_hlc:
+        print("Moving some HLCs back randomly")
+        inputs["hlcs"] = adjust_hlcs(inputs["hlcs"], inputs["info_signals"])
+
+    # Prepare dataset for LSTM
     inputs_flat, targets_flat = prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length)
 
     # Balance data
