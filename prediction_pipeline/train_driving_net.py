@@ -2,6 +2,7 @@
 import configparser
 import os
 from ast import literal_eval
+from distutils.util import strtobool
 from glob import glob
 
 import cv2
@@ -282,6 +283,7 @@ def load_driving_logs(dataset_folders: List[str], use_side_cameras: bool, steeri
 
             episode_path = Path(episode)
 
+            use_side_cameras_here = use_side_cameras
             df = pd.read_csv(str(episode_path / "driving_log.csv"))
             for index, row in df.iterrows():
                 if index == 0:
@@ -296,7 +298,7 @@ def load_driving_logs(dataset_folders: List[str], use_side_cameras: bool, steeri
                     traffic_light = 1 if row["speed"] > 0.01 else 0
                     hlc = translate_spurv_hlc_to_one_hot(row["high_level_command"])
                     temp_forward["center"].append(get_path(episode_path, row["image_path"]))
-                    use_side_cameras = False  # Explicitly state that we don't use side cameras
+                    use_side_cameras_here = False  # Explicitly state that we don't use side cameras
 
                 else:
                     [_, steer, _] = literal_eval(row["ClientAutopilotControls"])
@@ -317,7 +319,7 @@ def load_driving_logs(dataset_folders: List[str], use_side_cameras: bool, steeri
                 temp_info_signals["center"].append([speed, speed_limit, traffic_light])
                 temp_hlcs["center"].append(hlc)
 
-                if use_side_cameras:
+                if use_side_cameras_here:
                     # Only use the left/right shifted images for non lange-change data
                     # if row["HLC"] != 5 and row["HLC"] != 6:
                     temp_forward["left"].append(get_path(episode_path, row["ForwardLeft"]))
@@ -341,7 +343,7 @@ def load_driving_logs(dataset_folders: List[str], use_side_cameras: bool, steeri
             targets["steer"].append(temp_steer["center"])
             targets["target_speed"].append(temp_target_speed["center"])
 
-            if use_side_cameras:
+            if use_side_cameras_here:
                 inputs["forward_imgs"].append(temp_forward["left"])
                 inputs["forward_imgs"].append(temp_forward["right"])
                 inputs["info_signals"].append(temp_info_signals["left"])
@@ -354,8 +356,8 @@ def load_driving_logs(dataset_folders: List[str], use_side_cameras: bool, steeri
                 targets["target_speed"].append(temp_target_speed["right"])
 
     print("Done, {:d} episode(s) loaded.".format(len(inputs["forward_imgs"])))
-    if use_side_cameras:
-        print("Using side cameras as well, real episode count is ", len(inputs["forward_imgs"]) / 3)
+    # if use_side_cameras:
+    #     print("Using side cameras as well, real episode count is ", len(inputs["forward_imgs"]) / 3)
 
     return (inputs, targets)
 
@@ -664,6 +666,11 @@ def get_segmentation_model(model_type, freeze=True):
         segmentation_model = model_from_checkpoint_path(seven_class_vanilla_psp_path)
         x = segmentation_model.get_layer("activation_10").output
 
+    elif model_type == "seven_class_vanilla_psp_depth":
+        from utils.pspnet import model_from_checkpoint_path as custom_model_from_checkpoint_path
+        segmentation_model = custom_model_from_checkpoint_path(seven_class_vanilla_psp_depth_path)
+        x = segmentation_model.get_layer("activation_10").output
+
     elif model_type == "seven_class_mobile":
         segmentation_model = model_from_checkpoint_path(seven_class_mobile_checkpoints_path)
         output_layer = get_layer_with_name(segmentation_model, "conv_dw_6_relu")
@@ -711,8 +718,10 @@ def get_lstm_model(seq_length, freeze_segmentation, sine_steering=False, segm_mo
     hlc_latest = Lambda(lambda x: x[:, -1, :])(hlc_input)
     x = concatenate([x, hlc_latest])
 
-    steer_dim = 1 if not sine_steering else 10
-    steer_pred = Dense(steer_dim, activation="tanh", name="steer_pred")(x)
+    if sine_steering:
+        steer_pred = Dense(10, activation="tanh", name="steer_pred")(x)
+    else:
+        steer_pred = Dense(1, activation="relu", name="steer_pred")(x)
 
     target_speed_pred = Dense(1, name="target_speed_pred", activation="sigmoid")(x)
     model = Model(inputs=[forward_image_input, hlc_input, info_input], outputs=[steer_pred, target_speed_pred])
@@ -753,6 +762,8 @@ class generator(Sequence):
         steer_pred = self.targets["steer"][subset]
         if self.sine_steering:
             steer_pred = np.array([sine_encode(steer) for steer in steer_pred])
+        else:
+            steer_pred = (steer_pred + 1) / 2  # Normalize in [0,1]
         if not self.validation:
             for seq in read_images:
                 forward_imgs.append(
@@ -842,9 +853,15 @@ epochs_list = [100]
 
 dataset_folders_lists = \
     [
-        ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"],
-        ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg",
-         "/home/audun/fast_training_data/easy_traffic_lights_clear"],
+        ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_straight_mini", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_noise_mini", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_track_wet_clouded"],
+        # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_straight_mini"]
+        #["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_noise_mini"],
+        #["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"],
+        # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"#,
+        #  "/home/audun/fast_training_data/easy_traffic_lights_clear",
+        # "/home/audun/fast_training_data/easy_traffic_lights_rain"]
+#"/home/audun/fast_training_data/hegemax_like"
+         #],
         # ["/home/audun/fast_training_data/easy_traffic_lights_rain",
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear"],
         #
@@ -859,17 +876,18 @@ batch_sizes = [16]
 
 sampling_intervals = [3]
 
-seq_lengths = [5, 1]
+seq_lengths = [1]
 
-sine_steering_list = [True]
+sine_steering_list = [False]
 
-balance_data_list = [True, False]
+balance_data_list = [False]
 
-use_side_cameras_list = [True]
+use_side_cameras_list = [False]
 
 segmentation_model_name_list = ["seven_class_vanilla_psp"]
+# segmentation_model_name_list = ["seven_class_vanilla_psp_depth", "seven_class_vanilla_psp"]
 
-freeze_segmentation_list = [True, False]
+freeze_segmentation_list = [False]
 
 # ## Training loop
 parameter_permutations = itertools.product(epochs_list,
@@ -889,6 +907,14 @@ parameter_permutations = itertools.product(epochs_list,
 model_name = input("Name of model test: ").strip()
 parameter_permutations_list = [p for p in parameter_permutations]
 print(f"Preparing to train {len(parameter_permutations_list)} models")
+
+# Set up Tensorflow to not use all memory if not needed
+from keras.backend.tensorflow_backend import set_session
+import tensorflow as tf
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True  # dynamically grow the memory used on the GPU
+sess = tf.Session(config=config)
+set_session(sess)  # set this TensorFlow session as the default session for Keras
 
 # Used to only ask about continuing training on the first iteration
 first_iteration = True
@@ -924,8 +950,8 @@ for parameters in parameter_permutations_list:
     model_config = config["ModelConfig"]
     seq_length = int(model_config["sequence_length"])
     sampling_interval = int(model_config["sampling_interval"])
-    sine_steering = bool(model_config.get("sine_steering", True))
-    use_side_cameras = bool(model_config.get("use_side_cameras", False))
+    sine_steering = bool(strtobool(model_config.get("sine_steering", True)))
+    use_side_cameras = bool(strtobool(model_config.get("use_side_cameras", False)))
 
     checkpoint_val = ModelCheckpoint(
         str(path / (
