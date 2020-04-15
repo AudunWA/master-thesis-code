@@ -206,7 +206,8 @@ class LocalPlanner(object):
             control = carla.VehicleControl()
             control.steer = 0.0
             control.throttle = 0.0
-            control.brake = 1.0
+            # control.brake = 1.0
+            control.brake = 0.0  # Continue driving straight (for collecting data)
             control.hand_brake = False
             control.manual_gear_shift = False
 

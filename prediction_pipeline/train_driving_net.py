@@ -1,37 +1,38 @@
 ## Imports
-import configparser
-import os
-from ast import literal_eval
-from distutils.util import strtobool
 from glob import glob
 
+import configparser
 import cv2
 import itertools
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 import pandas as pd
 import time
+from ast import literal_eval
+from distutils.util import strtobool
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.engine.saving import load_model
 from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, CuDNNLSTM, \
-    Lambda
+    Lambda, BatchNormalization, Activation
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.utils import Sequence, plot_model
 from keras_segmentation.data_utils.data_loader import get_image_array
+from keras_segmentation.models._pspnet_2 import Interp
 from keras_segmentation.predict import model_from_checkpoint_path
 from keras_segmentation.pretrained import pspnet_101_cityscapes
 from pathlib import Path
 from typing import Tuple, List
 
-three_class_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/pspnet_50_three"
+three_class_checkpoints_path = "data/segmentation_models/pspnet_3_classes/pspnet_3_classes"
 seven_class_checkpoints_path = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
 seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
 seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
 seven_class_vanilla_psp_depth_path = "data/segmentation_models/pspnet_8_classes/2020-02-26_12-00-11/pspnet_8_classes"
 resnet50_pspnet_8_classes = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
 
-checkpoints_path = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
+resnet50_pspnet_3_classes = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
 
 import tensorflow as tf
 import keras.backend as K
@@ -528,8 +529,9 @@ def balance_hlc(inputs, targets, dist):
     """ Balance HLCs such that target fraction is correct """
 
     # Find the steering with least amount of values
-    # least_vals = min(dist["hlc"]["straight"], dist["hlc"]["left"], dist["hlc"]["right"], dist["hlc"]["follow_lane"])
-    least_vals = min(dist["hlc"]["left"], dist["hlc"]["right"], dist["hlc"]["follow_lane"])
+    least_vals = min(dist["hlc"]["straight"], dist["hlc"]["left"], dist["hlc"]["right"], dist["hlc"]["follow_lane"])
+    # SPURV
+    # least_vals = min(dist["hlc"]["left"], dist["hlc"]["right"], dist["hlc"]["follow_lane"])
 
     inputs_bal = create_input_dict()
     targets_bal = create_target_dict()
@@ -650,7 +652,9 @@ def get_segmentation_model(model_type, freeze=True):
     x = None
     segmentation_model = None
     if model_type == "three_class_trained":
-        segmentation_model = model_from_checkpoint_path(three_class_checkpoints_path)
+        from utils.pspnet import model_from_checkpoint_path as custom_model_from_checkpoint_path
+        segmentation_model = custom_model_from_checkpoint_path(three_class_checkpoints_path)
+        x = segmentation_model.get_layer("activation_10").output
 
     elif model_type == "seven_class_trained":
         segmentation_model = model_from_checkpoint_path(seven_class_checkpoints_path)
@@ -681,6 +685,10 @@ def get_segmentation_model(model_type, freeze=True):
         segmentation_model = model_from_checkpoint_path(resnet50_pspnet_8_classes)
         output_layer = segmentation_model.get_layer(name="conv2d_6")
         x = output_layer.output
+    elif model_type == "resnet50_pspnet_3_classes":
+        segmentation_model = model_from_checkpoint_path(resnet50_pspnet_3_classes)
+        output_layer = segmentation_model.get_layer(name="conv6")
+        x = output_layer.output
 
     plot_model(segmentation_model, "segmentation_model.png", show_shapes=True)
     # Explicitly define new model input and output by slicing out old model layers
@@ -706,8 +714,8 @@ def get_lstm_model(seq_length, freeze_segmentation, sine_steering=False, segm_mo
     segmentation_output = TimeDistributed(Flatten())(segmentation_output)
 
     # segmentation_output = Dropout(0.1)(segmentation_output)
-    # segmentation_output = BatchNormalization()(segmentation_output)
-    # segmentation_output = Activation(activation="relu")(segmentation_output)
+    segmentation_output = BatchNormalization()(segmentation_output)
+    segmentation_output = Activation(activation="relu")(segmentation_output)
 
     x = concatenate([segmentation_output, hlc_input, info_input])
     # x = Dropout(0.2)(x)
@@ -763,15 +771,18 @@ class generator(Sequence):
         if self.sine_steering:
             steer_pred = np.array([sine_encode(steer) for steer in steer_pred])
         else:
+            # pass
             steer_pred = (steer_pred + 1) / 2  # Normalize in [0,1]
         if not self.validation:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 192, 192, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, height=384, width=576, imgNorm="sub_mean", ordering='channels_last') for
+                     image in seq])
         else:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, 192, 192, imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    [get_image_array(image, height=384, width=576, imgNorm="sub_mean", ordering='channels_last') for
+                     image in seq])
 
         return {
                    "forward_image_input": np.array(forward_imgs),
@@ -809,7 +820,8 @@ def build_or_load_model(
         config.read(model_folder / "config.ini")
         return load_model(model_path, compile=True,
                           custom_objects={"custom": root_mean_squared_error,
-                                          "root_mean_squared_error": root_mean_squared_error}), model_folder, config, initial_epoch
+                                          "root_mean_squared_error": root_mean_squared_error,
+                                          "Interp": Interp}), model_folder, config, initial_epoch
     else:
         # Prepare for logging
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
@@ -847,32 +859,42 @@ def build_or_load_model(
 
 # Parameters
 val_split = 0.8
-adjust_hlc_list = [False]
+adjust_hlc_list = [True]
 
 epochs_list = [100]
 
 dataset_folders_lists = \
     [
-        ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_straight_mini", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_noise_mini", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_track_wet_clouded"],
+        # ["/home/audun/fast_training_data/no_vehicles_multiple_cameras", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"]
+        # ["/home/audun/fast_training_data/no_vehicles_multiple_cameras"]
+        # ["/home/audun/fast_training_data/no_vehicles_multiple_cameras", "/home/audun/fast_training_data/easy_traffic_lights_clear", "/home/audun/fast_training_data/easy_traffic_lights_rain"]
+        # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_straight_mini", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_noise_mini", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_track_wet_clouded"],
         # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_straight_mini"]
-        #["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_noise_mini"],
-        #["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"],
+        # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg", "/home/audun/Fordypningsprosjekt/SPURV_models/dataset/glos_cycle_noise_mini"],
+        # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"],
         # ["/home/audun/Fordypningsprosjekt/SPURV_models/dataset/closed_road_eberg"#,
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear",
         # "/home/audun/fast_training_data/easy_traffic_lights_rain"]
-#"/home/audun/fast_training_data/hegemax_like"
-         #],
+        # "/home/audun/fast_training_data/hegemax_like"
+        # ],co
         # ["/home/audun/fast_training_data/easy_traffic_lights_rain",
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear"],
-        #
+        # ["/home/audun/fast_training_data/hegemax_like"]
         # ["/home/audun/fast_training_data/easy_traffic_lights_rain",
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear",
         #  "/home/audun/fast_training_data/hegemax_like"]
+        ["/home/audun/fast_training_data/town01_easy_traffic_lights_clear_099",
+         "/home/audun/fast_training_data/town01_easy_traffic_lights_rain_099",
+         "/home/audun/fast_training_data/easy_traffic_lights_rain",
+         "/home/audun/fast_training_data/easy_traffic_lights_clear",
+         "/home/audun/fast_training_data/hegemax_like",
+         "/home/audun/fast_training_data/town01_hegemax_like_099"
+         ]
     ]
 
 steering_corrections = [0.05]
 
-batch_sizes = [16]
+batch_sizes = [8]
 
 sampling_intervals = [3]
 
@@ -880,14 +902,14 @@ seq_lengths = [1]
 
 sine_steering_list = [False]
 
-balance_data_list = [False]
+balance_data_list = [True]
 
-use_side_cameras_list = [False]
+use_side_cameras_list = [True]
 
-segmentation_model_name_list = ["seven_class_vanilla_psp"]
+segmentation_model_name_list = ["resnet50_pspnet_8_classes"]
 # segmentation_model_name_list = ["seven_class_vanilla_psp_depth", "seven_class_vanilla_psp"]
 
-freeze_segmentation_list = [False]
+freeze_segmentation_list = [True]
 
 # ## Training loop
 parameter_permutations = itertools.product(epochs_list,
@@ -911,6 +933,7 @@ print(f"Preparing to train {len(parameter_permutations_list)} models")
 # Set up Tensorflow to not use all memory if not needed
 from keras.backend.tensorflow_backend import set_session
 import tensorflow as tf
+
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True  # dynamically grow the memory used on the GPU
 sess = tf.Session(config=config)

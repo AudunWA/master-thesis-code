@@ -5,15 +5,19 @@ import cv2
 import numpy as np
 import os
 
+import keras
 from keras import Model
 from keras_segmentation.data_utils.data_loader import get_image_array
 from keras_segmentation.models._pspnet_2 import Interp
 from keras_segmentation.models.mobilenet import relu6
 from keras_segmentation.predict import model_from_checkpoint_path
 
-from utils import get_model_params
+from hegemax_model import get_hegemax_model
+from utils.pspnet import model_from_checkpoint_path as custom_model_from_checkpoint_path, parse_depth_pred
 
-import keras.losses
+from util import get_model_params
+
+import tensorflow.python.keras.losses
 import time
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
@@ -33,18 +37,32 @@ def encoder(x, angle):
 class SegmentationModel:
     def __init__(self, model_path):
         checkpoints_path = "seg_nets/" + model_path
-        self.model = model_from_checkpoint_path(checkpoints_path)
+        self.model = custom_model_from_checkpoint_path(checkpoints_path)
+        # self.model = model_from_checkpoint_path(checkpoints_path)
+        f, [self.ax1, self.ax2] = plt.subplots(2, 1)
         self.im = None
+        self.im2 = None
         self.model.summary()
 
     def plot_segmentation(self, images):
-        prediction = self.model.predict_segmentation(images["forward_center_rgb"]).astype('float32')
+        seg_prediction, depth_prediction = self.model.predict_segmentation(images["forward_center_rgb"])
         (width, height, _) = images["forward_center_rgb"].shape
-        prediction = cv2.resize(prediction, dsize=(height, width), interpolation=cv2.INTER_NEAREST)
+        seg_prediction = cv2.resize(seg_prediction.astype('float32'), dsize=(height, width), interpolation=cv2.INTER_NEAREST)
+        depth_prediction = cv2.resize((parse_depth_pred(depth_prediction) / 255).astype('float32'), dsize=(height, width), interpolation=cv2.INTER_NEAREST)
         if self.im is None:
-            self.im = plt.imshow(prediction)
+            self.im = self.ax1.imshow(seg_prediction)
+            # self.im = plt.imshow(np.concatenate(seg_prediction, depth_prediction))
         else:
-            self.im.set_data(prediction)
+            self.im.set_data(seg_prediction)
+            # self.im.set_data(np.concatenate(seg_prediction, depth_prediction))
+
+        if self.im2 is None:
+            self.im2 = self.ax2.imshow(depth_prediction)
+            # self.im = plt.imshow(np.concatenate(seg_prediction, depth_prediction))
+        else:
+            self.im2.set_data(depth_prediction)
+            # self.im.set_data(np.concatenate(seg_prediction, depth_prediction))
+
         plt.pause(0.00001)
         plt.draw()
 
@@ -63,8 +81,15 @@ class LSTMKeras(ModelInterface):
 
         # Network parameters
         self._sampling_interval = sampling_interval + capture_rate - 1
+        # Uncomment for legacy models
+        # self.hlc_one_hot = {1: [1, 0, 0, 0, 0, 0], 2: [0, 1, 0, 0, 0, 0], 3: [0, 0, 1, 0, 0, 0], 4: [0, 0, 0, 1, 0, 0], 5: [0, 0, 0, 0],
+        #                     6: [0, 0, 0, 0]}
+        # Normal
         self.hlc_one_hot = {1: [1, 0, 0, 0], 2: [0, 1, 0, 0], 3: [0, 0, 1, 0], 4: [0, 0, 0, 1], 5: [0, 0, 0, 0],
                             6: [0, 0, 0, 0]}
+        # SPURV
+        # self.hlc_one_hot = {1: [1, 0, 0, 0], 2: [0, 1, 0, 0], 3: [0, 0, 0, 1], 4: [0, 0, 0, 1], 5: [0, 0, 0, 0],
+        #                     6: [0, 0, 0, 0]}
         self.environment_one_hot = {0: [1, 0], 1: [0, 1]}
 
         self.loaded_at = time.time()
@@ -85,7 +110,11 @@ class LSTMKeras(ModelInterface):
         self._hlc_history = []
         self._environment_history = []
 
-    def _load_model(self, path):
+    def _load_model(self, path: str):
+        # Uncomment for legacy models
+        # model: tensorflow.python.keras.Model = get_hegemax_model(1, True)
+        # model.load_weights(path)
+        # self._model = model
         self._model = keras.models.load_model(path, compile=False, custom_objects={'Interp': Interp, 'relu6': relu6})
         (self.height, self.width, self.channels), self.sequence_length, self.sine_steering = get_model_params(
             self._model)
@@ -111,11 +140,16 @@ class LSTMKeras(ModelInterface):
         if self._model is None:
             return False
         req = (self.sequence_length - 1) * (self._sampling_interval + 1) + 1
+        # Uncomment for legacy models
+        # img_center = cv2.cvtColor(cv2.resize(images["forward_center_rgb"], (self.width, self.height)), cv2.COLOR_BGR2LAB)
+        # info_input = [
+        #     max(float(info["speed"] * 3.6 / 100), 0.2),
+        #     float(info["speed_limit"] * 3.6 / 100),
+        #     info["traffic_light"]
+        # ]
 
         img_center = get_image_array(images["forward_center_rgb"], height=self.height, width=self.width, imgNorm="sub_mean",
                                      ordering='channels_last')
-        """img_left = cv2.cvtColor(images["left_center_rgb"], cv2.COLOR_BGR2LAB)
-        img_right = cv2.cvtColor(images["right_center_rgb"], cv2.COLOR_BGR2LAB)"""
         info_input = [
             float(info["speed"] * 3.6 / 30 - 1),
             float(info["speed_limit"] * 3.6 / 30 - 1),
@@ -161,6 +195,9 @@ class LSTMKeras(ModelInterface):
             if self.sine_steering:
                 steer_curve_parameters = curve_fit(encoder, np.arange(1, 11, 1), steer)[0]
                 steer_angle = steer_curve_parameters[0]
+            else:
+                # pass
+                steer_angle = steer_angle * 2 - 1
 
             # Target speed
             if len(prediction) == 2:
@@ -170,7 +207,7 @@ class LSTMKeras(ModelInterface):
                 self._last_pred = (steer_angle, 0, 0, target_speed)
                 print("Steer: ", steer_angle, ", target speed: ", target_speed)
             else:
-                throttle = prediction[0][0], prediction[1][0][0]
+                throttle = prediction[1][0][0]
                 if len(prediction) == 3:
                     brake = prediction[2][0][0]
                 else:

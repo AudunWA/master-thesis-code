@@ -7,15 +7,20 @@ import math
 from configparser import ConfigParser
 
 from agents.navigation.local_planner import RoadOption
-from agents.tools.misc import distance_vehicle
+from agents.tools.misc import distance_vehicle, get_nearest_traffic_light
 from misc import get_distance
 
 
 def set_green_traffic_light(player):
 
-    traffic_light_state = player.get_traffic_light_state()
-    if traffic_light_state is not None and traffic_light_state ==  carla.TrafficLightState.Red: 
-        traffic_light = player.get_traffic_light()
+    # traffic_light_state = player.get_traffic_light_state()
+    # if traffic_light_state is not None and traffic_light_state ==  carla.TrafficLightState.Red:
+    #     traffic_light = player.get_traffic_light()
+    #     traffic_light.set_state(carla.TrafficLightState.Green)
+
+    traffic_light, distance = get_nearest_traffic_light(player)
+    traffic_light_state = traffic_light.state if traffic_light else None
+    if traffic_light_state is not None and traffic_light_state != carla.TrafficLightState.Green:
         traffic_light.set_state(carla.TrafficLightState.Green)
 
 

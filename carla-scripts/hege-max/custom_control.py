@@ -60,6 +60,9 @@ from __future__ import print_function
 # VERY IMPORTANT, DO NOT REMOVE EVEN IF UNUSED
 # SEE https://github.com/tensorflow/tensorflow/issues/34828 and https://github.com/tensorflow/tensorflow/pull/34847
 # noinspection PyUnresolvedReferences
+import itertools
+from random import shuffle
+
 import tensorflow
 ####
 
@@ -70,10 +73,11 @@ from agents.navigation.agent import Agent
 from agents.navigation.basic_agent import BasicAgent
 from agents.navigation.controller import PIDLongitudinalController
 from agents.tools.misc import get_traffic_light_status
-from utils import init_tensorflow
+from util import init_tensorflow
 
-
-FIXED_DELTA_SECONDS = 0.05
+FIXED_DELTA_SECONDS = 1 / 20
+# HegeMax
+# FIXED_DELTA_SECONDS = 1 / 30
 
 # ==============================================================================
 # -- imports -------------------------------------------------------------------
@@ -82,7 +86,7 @@ FIXED_DELTA_SECONDS = 0.05
 
 import carla
 
-from carla import ColorConverter as cc, LaneInvasionEvent
+from carla import ColorConverter as cc, LaneInvasionEvent, WeatherParameters
 
 from pathlib import Path
 
@@ -234,7 +238,7 @@ class World(object):
 
         # Route recording 
         self._new_spawn_point = None
-        self._routes = None
+        self._routes: Optional[List] = None
         self._current_route_num = None
         self._tot_route_num = None
         self._auto_record = None
@@ -348,7 +352,7 @@ class World(object):
             spawn_point = self.map.get_spawn_points()[self._eval_routes[self._eval_routes_idx][0][0]]
             destination_point = self.map.get_spawn_points()[self._eval_routes[self._eval_routes_idx][-1][0]]
             self._spawn_point_start = self._eval_routes[self._eval_routes_idx][0][0]
-            if self._eval_cars is not None:
+            if self._eval_cars is not None and self._eval_cars[self._eval_cars_idx] > 0:
                 self._vehicle_spawner.spawn_nearby(
                     self._spawn_point_start,
                     self._eval_cars[self._eval_cars_idx],
@@ -397,7 +401,8 @@ class World(object):
 
         # Set up the sensors.
         self.camera_manager = CameraManager(self.player, self.client_ap, self.hud,
-                                            self.history, self, self._eval_mode, self._hq_recording)
+                                            self.history, self, self._eval_mode, self._hq_recording,
+                                            self._current_route_num - 1 if self._current_route_num is not None else 0)
         self.camera_manager._transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
         self.camera_manager._initiate_recording()
@@ -447,7 +452,13 @@ class World(object):
 
         preset = self._weather_presets[self._weather_index]
         self.hud.notification('Weather: %s' % preset[1])
-        self.player.get_world().set_weather(preset[0])
+        weather_params: WeatherParameters = preset[0]
+        # weather_params.wetness = 0
+        # weather_params.cloudyness = -1
+        # weather_params.sun_azimuth_angle = -1
+        self.player.get_world().set_weather(weather_params)
+        self.world.tick()
+        print(self.player.get_world().get_weather())
 
         self.history.update_weather_index(self._weather_index)
 
@@ -480,7 +491,21 @@ class World(object):
 
         self.hud.tick(self, clock)
         self.camera_manager.tick()
+        if self.camera_manager.did_collide:
+            self.camera_manager.did_collide = False
+            self.history.restart()
 
+            # Go to next
+            # self._routes.insert(0, [self._spawn_point_start, self._spawn_point_destination])
+            # self._current_route_num -= 1
+            # self.next_weather(weather_type=self._weather_type, reverse=True)
+            self.restart()
+
+            # # Reset state
+            # self._routes.insert(0, [self._spawn_point_start, self._spawn_point_destination])
+            # self._current_route_num -= 1
+            # self.next_weather(weather_type=self._weather_type, reverse=True)
+            # self.restart()
         if self._eval_mode:
             self.evaluator.tick()
 
@@ -1311,8 +1336,9 @@ class HelpText(object):
 
 
 class CameraManager(object):
-    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History',  worldObject: World, eval=False,
-                 hq_recording=False):
+    def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', worldObject: World,
+                 eval=False,
+                 hq_recording=False, route_number=0):
         self.world = worldObject
         self.sensor = None
         self._surface = None
@@ -1324,9 +1350,31 @@ class CameraManager(object):
         self._capture_rate = 1 if hq_recording else 3
         self._frame_number = 1
         self._hq_recording = hq_recording
+        self.did_collide = False
+        self.change_cameras = False
+
+        # We want to collect training data with varying camera settings
+        # First Z is 21 above ground, about the same as SPURV
+        # z_offsets = [-2.09, -1.5, -0.5, 0]
+        z_offsets = [-1.5, -0.5, 0, 0.5]
+        pitch_offsets = [0, 5, 10]
+        fov_variations = [65, 90, 110]
+        self._transform_variations_list = [p for p in itertools.product(z_offsets, pitch_offsets, fov_variations)]
+        RANDOM_SEED = 401241
+        import random
+        random.Random(RANDOM_SEED).shuffle(self._transform_variations_list)
+
+        self._camera_transform_index = route_number
+        self._camera_transform_index %= len(self._transform_variations_list)
+        print(self._transform_variations_list[self._camera_transform_index])
+
         self._camera_transforms = [
             carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
             carla.Transform(carla.Location(x=0.5, z=2.3), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=2.4, z=2.3), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=2.4, z=2.8), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=2.4, z=1.8), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=2.4, z=0.8), carla.Rotation(pitch=-5)),
         ]
         self._transform_index = 1
         self.eval = eval
@@ -1377,24 +1425,29 @@ class CameraManager(object):
 
         # Retry if we collide with something
         if self._recording and not self.world._eval_mode:
+            self.did_collide = True
             self.world.hud.notification("Collision detected, retrying.")
             print("Collision detected, retrying")
-            self.world.history.restart()
-            self.world.history._active = True
-            self.world.restart()
+            # self.world.history.restart()
+            # self.world.history._active = True
+            # self.world.restart()
 
     def _initiate_recording(self):
+        z_offset, pitch_offset, fov = 0, 0, 90 if self.eval or not self.change_cameras else self._transform_variations_list[
+            self._camera_transform_index]
 
-        sensor_bp = self._parent.get_world().get_blueprint_library().find(
-            'sensor.camera.rgb')
+        sensor_bp = self._parent.get_world().get_blueprint_library().find('sensor.camera.rgb')
         # sensor_bp.set_attribute('image_size_x', "350")
         # sensor_bp.set_attribute('image_size_y', "160")
         sensor_bp.set_attribute('image_size_x', "490")
         sensor_bp.set_attribute('image_size_y', "224")
+        sensor_bp.set_attribute('fov', str(fov))
 
+        # Other camera angels heights needs to be further in front to not end up inside the vehicle
+        CAMERA_X = 2.4 if self.change_cameras else 0.5
         sensor = self._parent.get_world().spawn_actor(
             sensor_bp,
-            carla.Transform(carla.Location(x=0.5, z=2.3), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=CAMERA_X, z=2.3 + z_offset), carla.Rotation(pitch=-5 + pitch_offset)),
             attach_to=self._parent)
         sensor.listen(lambda image: self._history.update_image(
             image, "forward_center", "rgb"))
@@ -1402,7 +1455,8 @@ class CameraManager(object):
         if not self.eval:
             sensor = self._parent.get_world().spawn_actor(
                 sensor_bp,
-                carla.Transform(carla.Location(x=0.5, y=-0.7, z=2.3), carla.Rotation(pitch=-5)),
+                carla.Transform(carla.Location(x=CAMERA_X, y=-0.7, z=2.3 + z_offset),
+                                carla.Rotation(pitch=-5 + pitch_offset)),
                 attach_to=self._parent)
             sensor.listen(lambda image: self._history.update_image(
                 image, "forward_left", "rgb"))
@@ -1410,7 +1464,8 @@ class CameraManager(object):
 
             sensor = self._parent.get_world().spawn_actor(
                 sensor_bp,
-                carla.Transform(carla.Location(x=0.5, y=0.7, z=2.3), carla.Rotation(pitch=-5)),
+                carla.Transform(carla.Location(x=CAMERA_X, y=0.8, z=2.3 + z_offset),
+                                carla.Rotation(pitch=-5 + pitch_offset)),
                 attach_to=self._parent)
             sensor.listen(lambda image: self._history.update_image(
                 image, "forward_right", "rgb"))
@@ -1418,7 +1473,8 @@ class CameraManager(object):
 
             sensor = self._parent.get_world().spawn_actor(
                 sensor_bp,
-                carla.Transform(carla.Location(x=0, y=-0.5, z=1.8), carla.Rotation(pitch=-20, yaw=-90)),
+                carla.Transform(carla.Location(x=0, y=-0.6, z=1.8 + z_offset),
+                                carla.Rotation(pitch=-20 + pitch_offset, yaw=-90)),
                 attach_to=self._parent)
             sensor.listen(lambda image: self._history.update_image(
                 image, "left_center", "rgb"))
@@ -1426,7 +1482,8 @@ class CameraManager(object):
 
             sensor = self._parent.get_world().spawn_actor(
                 sensor_bp,
-                carla.Transform(carla.Location(x=0, y=0.5, z=1.8), carla.Rotation(pitch=-20, yaw=90)),
+                carla.Transform(carla.Location(x=0, y=0.5, z=1.8 + z_offset),
+                                carla.Rotation(pitch=-20 + pitch_offset, yaw=90)),
                 attach_to=self._parent)
             sensor.listen(lambda image: self._history.update_image(
                 image, "right_center", "rgb"))
@@ -1437,10 +1494,11 @@ class CameraManager(object):
                 'sensor.camera.rgb')
             sensor_bp.set_attribute('image_size_x', "1920")
             sensor_bp.set_attribute('image_size_y', "1080")
+            sensor_bp.set_attribute('fov', str(fov))
 
             sensor = self._parent.get_world().spawn_actor(
                 sensor_bp,
-                carla.Transform(carla.Location(x=-0.5, z=2.0)),
+                carla.Transform(carla.Location(x=CAMERA_X, z=2.0 + z_offset)),
                 attach_to=self._parent)
             sensor.listen(lambda image: self._history.update_image_hq(
                 image, "hq_record", "rgb"))
@@ -1765,13 +1823,13 @@ class Evaluator():
             self.current_wp = wp
 
         hero_transform = self.world.player.get_transform()
-        dist = get_distance(self.world.map.get_spawn_points()[wp].location, hero_transform.location)
+        dist_to_goal = get_distance(self.world.map.get_spawn_points()[wp].location, hero_transform.location)
         hero_location = hero_transform.location
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
-        if self.last_dist > dist:
-            self.last_dist = dist
+        if self.last_dist > dist_to_goal + 0.1:
+            self.last_dist = dist_to_goal
             self.last_dist_at = time.time()
-        elif self.last_dist < dist - 20:
+        elif self.last_dist + 20 < dist_to_goal:
             event_type = EventType.HLC_IGNORE
             self.error_counter[event_type.name] += 1
             self.cancel_reason = event_type
@@ -1786,9 +1844,11 @@ class Evaluator():
                 ],
                     index=self.event_logs[-1].columns),
                 ignore_index=True)
+            print("Ignored HLC, moving on")
             return
 
-        if self.last_dist_at and self.last_dist_at + 120 < time.time():
+        STUCK_TIMEOUT_SECONDS = 30
+        if self.last_dist_at and self.last_dist_at + STUCK_TIMEOUT_SECONDS < time.time():
             # Model is stuck
             event_type = EventType.STUCK
             self.error_counter[event_type.name] += 1
@@ -1804,6 +1864,7 @@ class Evaluator():
                 ],
                     index=self.event_logs[-1].columns),
                 ignore_index=True)
+            print("Got stuck, moving on")
             return
 
         closest_wp = self.world.map.get_waypoint(self.world.player.get_location())
@@ -1832,6 +1893,7 @@ class Evaluator():
                     ],
                         index=self.event_logs[-1].columns),
                     ignore_index=True)
+                print("Didn't recover from oncoming lane, moving on")
                 return
         else:
             if self.entered_oncoming_lane_at and self.entered_oncoming_lane_at < time.time():
@@ -1882,12 +1944,12 @@ class Evaluator():
                                                        )
         # Write eventlog to csv
         model_name = '_'.join(self.hud._drive_model_name.split('/'))
-        dir_path = Path("EvalResults") / self.current_eval_timestamp / model_name / "EventLogs"
+        dir_path = Path("EvalResults_paper") / self.current_eval_timestamp / model_name / "EventLogs"
         csv_path = dir_path / (self.current_episode_timestamp + ".csv")
         dir_path.mkdir(parents=True, exist_ok=True)
         self.event_logs[-1].to_csv(csv_path)
 
-        model_summary_path = Path("EvalResults") / self.current_eval_timestamp / model_name / "summary.csv"
+        model_summary_path = Path("EvalResults_paper") / self.current_eval_timestamp / model_name / "summary.csv"
         self.model_summary.to_csv(str(model_summary_path))
 
     def initialize_sensors(self, parent_actor):
@@ -2028,23 +2090,27 @@ def game_loop(args):
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(15.0)
-
-    client.load_world("Town02")
-    sim_world: carla.World = client.get_world()
-    map_name = sim_world.get_map().name
-
-    # Enable synchronous mode
-    sim_settings = sim_world.get_settings()
-    sim_settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
-    sim_settings.synchronous_mode = True
-    sim_world.apply_settings(sim_settings)
+    world_set = False
 
     from glob import glob
-    for settings_path in sorted(glob(str("settings/*.ini"))):
+    for settings_path in sorted(glob(str(f"{args.settings}/*.ini"))):
         try:
             settings = ConfigParser()
             settings.read(settings_path)
             print("Running with settings file ", settings_path)
+
+            if not world_set:
+                world_set = True
+                map_name = settings.get("Settings", "World", fallback="World01")
+                print(f"Loading world {map_name}")
+                client.load_world(map_name)
+                sim_world: carla.World = client.get_world()
+
+                # Enable synchronous mode
+                sim_settings = sim_world.get_settings()
+                sim_settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
+                sim_settings.synchronous_mode = True
+                sim_world.apply_settings(sim_settings)
 
             # Get environment
             if map_name == "Town01" or map_name == "Town02":
@@ -2152,6 +2218,12 @@ def main():
         dest='models',
         default=None,
         help='folders with models to test, models must be in separate folders with its own config-file')
+    argparser.add_argument(
+        '-s',
+        '--settings',
+        dest='settings',
+        default="settings",
+        help='folders with different settings files to use')
     argparser.add_argument(
         '-j',
         '--joystick',
