@@ -8,39 +8,26 @@
 
 """Spawn NPCs into the simulation"""
 
-import glob
-import os
-import sys
 import math
-import time
+import random
 from typing import List
 
-try:
-    sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
-        sys.version_info.major,
-        sys.version_info.minor,
-        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
-except IndexError:
-    pass
-
 import carla
-
-import random
 
 
 class VehicleSpawner(object):
 
-    def __init__(self, client: carla.Client, world: carla.World):
+    def __init__(self, client: carla.Client, world: carla.World, safe_mode=True):
         self.client = client
         self.world = world
         self.spawn_points = self.world.get_map().get_spawn_points()
         self.blueprints = self.world.get_blueprint_library().filter("vehicle.*")
         self.blueprintsWalkers = world.get_blueprint_library().filter("walker.pedestrian.*")
-        self._spawned_vehicles = []
-        self.vehicles_list: List[carla.Vehicle] = []
-        self._walkers_list = []
-        self._all_id = []
-        self._all_actors = []
+        self.vehicles_list: List[int] = []
+        self.walkers_list = []
+        self.all_id = []
+        self.all_actors = []
+        self.safe_mode = safe_mode
         self._bad_colors = [
             "255,255,255", "183,187,162", "237,237,237",
             "134,134,134", "243,243,243", "127,130,135",
@@ -50,27 +37,30 @@ class VehicleSpawner(object):
             "108,109,126", "193,193,193", "227,227,227",
             "151,150,125", "206,206,206", "255,222,218",
             "211,211,211", "191,191,191"
-        ]
-        self.traffic_manager = self.client.get_trafficmanager(8000)
+        ] if safe_mode else []
+
+    def init_traffic_manager(self):
+        traffic_manager = self.client.get_trafficmanager(8000)
+        traffic_manager.set_global_distance_to_leading_vehicle(2.0)
+        traffic_manager.global_percentage_speed_difference(25.0)
+        traffic_manager.set_hybrid_physics_mode(True)
+        traffic_manager.set_synchronous_mode(True)
 
     def spawn_nearby(self, hero_spawn_point_index, number_of_vehicles_min, number_of_vehicles_max,
                      number_of_walkers_min, number_of_walkers_max, radius):
-        self.traffic_manager.set_global_distance_to_leading_vehicle(2.0)
-        self.traffic_manager.global_percentage_speed_difference(25.0)
-        self.traffic_manager.set_hybrid_physics_mode(True)
-        self.traffic_manager.set_synchronous_mode(True)
 
         number_of_vehicles = random.randint(number_of_vehicles_min, number_of_vehicles_max)
         number_of_walkers = random.randint(number_of_walkers_min, number_of_walkers_max)
         print(f"Attempting to spawn {number_of_vehicles} vehicles, {number_of_walkers} walkers")
         valid_spawn_points = self.get_valid_spawn_points(hero_spawn_point_index, radius)
 
-        self.blueprints = [x for x in self.blueprints if int(x.get_attribute('number_of_wheels')) == 4]
-        self.blueprints = [x for x in self.blueprints if not x.id.endswith('isetta')]
-        self.blueprints = [x for x in self.blueprints if not x.id.endswith('carlacola')]
-        self.blueprints = [x for x in self.blueprints if not x.id.endswith('cybertruck')]
-        self.blueprints = [x for x in self.blueprints if not x.id.endswith('t2')]
-        self.blueprints = [x for x in self.blueprints if not x.id.endswith('coupe')]
+        if self.safe_mode:
+            self.blueprints = [x for x in self.blueprints if int(x.get_attribute('number_of_wheels')) == 4]
+            self.blueprints = [x for x in self.blueprints if not x.id.endswith('isetta')]
+            self.blueprints = [x for x in self.blueprints if not x.id.endswith('carlacola')]
+            self.blueprints = [x for x in self.blueprints if not x.id.endswith('cybertruck')]
+            self.blueprints = [x for x in self.blueprints if not x.id.endswith('t2')]
+            self.blueprints = [x for x in self.blueprints if not x.id.endswith('coupe')]
 
         number_of_spawn_points = len(valid_spawn_points)
 
@@ -91,7 +81,7 @@ class VehicleSpawner(object):
                 break
             blueprint = random.choice(self.blueprints)
             if blueprint.has_attribute('color'):
-                color = "255,255,255"
+                color = random.choice(blueprint.get_attribute('color').recommended_values)
                 while color in self._bad_colors:
                     color = random.choice(blueprint.get_attribute('color').recommended_values)
                 blueprint.set_attribute('color', color)
@@ -110,60 +100,78 @@ class VehicleSpawner(object):
         # -------------
         # Spawn Walkers
         # -------------
+        # some settings
+        percentagePedestriansRunning = 0.0  # how many pedestrians will run
+        percentagePedestriansCrossing = 0.0  # how many pedestrians will walk through the road
         # 1. take all the random locations to spawn
-        # walker_spawn_points = []
-        # for i in range(number_of_walkers):
-        #     spawn_point = carla.Transform()
-        #     loc = self.world.get_random_location_from_navigation()
-        #     if (loc != None):
-        #         spawn_point.location = loc
-        #         walker_spawn_points.append(spawn_point)
-        # # 2. we spawn the walker object
-        # batch = []
-        # for spawn_point in walker_spawn_points:
-        #     walker_bp = random.choice(self.blueprintsWalkers)
-        #     # set as not invencible
-        #     if walker_bp.has_attribute('is_invincible'):
-        #         walker_bp.set_attribute('is_invincible', 'false')
-        #     batch.append(SpawnActor(walker_bp, spawn_point))
-        # results = self.client.apply_batch_sync(batch, True)
-        # for i in range(len(results)):
-        #     if results[i].error:
-        #         print(results[i].error)
-        #     else:
-        #         self._walkers_list.append({"id": results[i].actor_id})
-        # # 3. we spawn the walker controller
-        # batch = []
-        # walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
-        # for i in range(len(self._walkers_list)):
-        #     batch.append(SpawnActor(walker_controller_bp, carla.Transform(), self._walkers_list[i]["id"]))
-        # results = self.client.apply_batch_sync(batch, True)
-        # for i in range(len(results)):
-        #     if results[i].error:
-        #         print(results[i].error)
-        #     else:
-        #         self._walkers_list[i]["con"] = results[i].actor_id
-        # # 4. we put altogether the walkers and controllers id to get the objects from their id
-        # for i in range(len(self._walkers_list)):
-        #     self._all_id.append(self._walkers_list[i]["con"])
-        #     self._all_id.append(self._walkers_list[i]["id"])
-        # self._all_actors = self.world.get_actors(self._all_id)
-        #
-        # # wait for a tick to ensure client receives the last transform of the walkers we have just created
-        # self.world.tick()
-        # # self.world.wait_for_tick()
-        #
-        # # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
-        # for i in range(0, len(self._all_id), 2):
-        #     # start walker
-        #     self._all_actors[i].start()
-        #     # set walk to random point
-        #     self._all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
-        #     # random max speed
-        #     self._all_actors[i].set_max_speed(
-        #         1 + random.random() / 2)  # max speed between 1 and 1.5 (default is 1.4 m/s)
+        spawn_points = []
+        for i in range(number_of_walkers):
+            spawn_point = carla.Transform()
+            loc = self.world.get_random_location_from_navigation()
+            if (loc != None):
+                spawn_point.location = loc
+                spawn_points.append(spawn_point)
+        # 2. we spawn the walker object
+        batch = []
+        walker_speed = []
+        for spawn_point in spawn_points:
+            walker_bp = random.choice(self.blueprintsWalkers)
+            # set as not invincible
+            if walker_bp.has_attribute('is_invincible'):
+                walker_bp.set_attribute('is_invincible', 'false')
+            # set the max speed
+            if walker_bp.has_attribute('speed'):
+                if (random.random() > percentagePedestriansRunning):
+                    # walking
+                    walker_speed.append(walker_bp.get_attribute('speed').recommended_values[1])
+                else:
+                    # running
+                    walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
+            else:
+                print("Walker has no speed")
+                walker_speed.append(0.0)
+            batch.append(SpawnActor(walker_bp, spawn_point))
+        results = self.client.apply_batch_sync(batch, True)
+        walker_speed2 = []
+        for i in range(len(results)):
+            if results[i].error:
+                print(results[i].error)
+            else:
+                self.walkers_list.append({"id": results[i].actor_id})
+                walker_speed2.append(walker_speed[i])
+        walker_speed = walker_speed2
+        # 3. we spawn the walker controller
+        batch = []
+        walker_controller_bp = self.world.get_blueprint_library().find('controller.ai.walker')
+        for i in range(len(self.walkers_list)):
+            batch.append(SpawnActor(walker_controller_bp, carla.Transform(), self.walkers_list[i]["id"]))
+        results = self.client.apply_batch_sync(batch, True)
+        for i in range(len(results)):
+            if results[i].error:
+                print(results[i].error)
+            else:
+                self.walkers_list[i]["con"] = results[i].actor_id
+        # 4. we put altogether the walkers and controllers id to get the objects from their id
+        for i in range(len(self.walkers_list)):
+            self.all_id.append(self.walkers_list[i]["con"])
+            self.all_id.append(self.walkers_list[i]["id"])
+        self.all_actors = self.world.get_actors(self.all_id)
 
-        print(f'Spawned {len(self.vehicles_list):d} vehicles and {0:d} walkers,')
+        # tick to ensure client receives the last transform of the walkers we have just created
+        self.world.tick()
+
+        # 5. initialize each controller and set target to walk to (list is [controler, actor, controller, actor ...])
+        # set how many pedestrians can cross the road
+        self.world.set_pedestrians_cross_factor(percentagePedestriansCrossing)
+        for i in range(0, len(self.all_id), 2):
+            # start walker
+            self.all_actors[i].start()
+            # set walk to random point
+            self.all_actors[i].go_to_location(self.world.get_random_location_from_navigation())
+            # max speed
+            self.all_actors[i].set_max_speed(float(walker_speed[int(i / 2)]))
+
+        print(f'Spawned {len(self.vehicles_list):d} vehicles and {len(self.walkers_list):d} walkers,')
 
     def get_valid_spawn_points(self, hero_spawn_point_index, radius):
         hero_spawn_point = self.spawn_points[hero_spawn_point_index]
@@ -194,12 +202,15 @@ class VehicleSpawner(object):
 
     def destroy_vehicles(self):
         print(f'Destroying {len(self.vehicles_list):d} vehicles.\n')
-        self.client.apply_batch([carla.command.DestroyActor(x) for x in self.vehicles_list])
+        self.client.apply_batch_sync([carla.command.DestroyActor(x) for x in self.vehicles_list], True)
         self.vehicles_list.clear()
 
         # stop walker controllers (list is [controller, actor, controller, actor ...])
-        # for i in range(0, len(all_id), 2):
-        #     all_actors[i].stop()
-        #
-        # print('\ndestroying %d walkers' % len(walkers_list))
-        # client.apply_batch([carla.command.DestroyActor(x) for x in all_id])
+        for i in range(0, len(self.all_id), 2):
+            self.all_actors[i].stop()
+
+        print('\ndestroying %d walkers' % len(self.walkers_list))
+        self.client.apply_batch_sync([carla.command.DestroyActor(x) for x in self.all_id], True)
+        self.walkers_list = []
+        self.all_id = []
+        self.all_actors = []

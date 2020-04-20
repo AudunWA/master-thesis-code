@@ -353,6 +353,7 @@ class World(object):
             destination_point = self.map.get_spawn_points()[self._eval_routes[self._eval_routes_idx][-1][0]]
             self._spawn_point_start = self._eval_routes[self._eval_routes_idx][0][0]
             if self._eval_cars is not None and self._eval_cars[self._eval_cars_idx] > 0:
+                self._vehicle_spawner.init_traffic_manager()
                 self._vehicle_spawner.spawn_nearby(
                     self._spawn_point_start,
                     self._eval_cars[self._eval_cars_idx],
@@ -420,6 +421,7 @@ class World(object):
 
         # Spawn other vehicles, but not in eval mode  
         if not self._eval_mode and self._num_vehicles_max != 0 and self._spawning_radius is not None:
+            self._vehicle_spawner.init_traffic_manager()
             self._vehicle_spawner.spawn_nearby(self._spawn_point_start, self._num_vehicles_min, self._num_vehicles_max,
                                                self._num_walkers_min, self._num_walkers_max, self._spawning_radius)
 

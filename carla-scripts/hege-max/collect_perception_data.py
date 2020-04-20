@@ -165,7 +165,7 @@ def main():
         world.set_weather(weather.weather)
 
         vehicle_spawner = VehicleSpawner(client, world, False)
-        vehicle_spawner.spawn_nearby(client, world, 0, 40, 70, 25, 80, 1000)
+        vehicle_spawner.spawn_nearby(0, 40, 70, 25, 80, 1000)
 
         print("Running the world for 5 seconds before capturing...")
         frame = start_frame
@@ -234,6 +234,6 @@ def main():
         # traffic_manager.set_synchronous_mode(False)
         for sensor in all_sensors:
             sensor.destroy()
-        vehicle_spawner.destroy_vehicles(client)
+        vehicle_spawner.destroy_vehicles()
 
 main()
