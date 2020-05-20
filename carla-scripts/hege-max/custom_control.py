@@ -61,13 +61,8 @@ from __future__ import print_function
 # SEE https://github.com/tensorflow/tensorflow/issues/34828 and https://github.com/tensorflow/tensorflow/pull/34847
 # noinspection PyUnresolvedReferences
 import itertools
-from random import shuffle
-
-import tensorflow
-####
-
 import os
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from agents.navigation.agent import Agent
 from agents.navigation.basic_agent import BasicAgent
@@ -75,6 +70,10 @@ from agents.navigation.controller import PIDLongitudinalController
 from agents.tools.misc import get_traffic_light_status
 from util import init_tensorflow
 
+####
+
+EVAL_RESULTS_PATH = "EvalResults_paper"
+# EVAL_RESULTS_PATH = "EvalResults_paper_ex4"
 FIXED_DELTA_SECONDS = 1 / 20
 # HegeMax
 # FIXED_DELTA_SECONDS = 1 / 30
@@ -184,7 +183,27 @@ def find_weather_presets():
     presets = [
         x for x in dir(carla.WeatherParameters) if re.match('[A-Z].+', x)
     ]
-    return [(getattr(carla.WeatherParameters, x), name(x)) for x in presets]
+    preset_values = [(getattr(carla.WeatherParameters, x), name(x)) for x in presets]
+
+    clear_midnight: carla.WeatherParameters = carla.WeatherParameters(
+        cloudiness=0.0, precipitation=0.0,
+        precipitation_deposits=0.0, wind_intensity=0.0,
+        sun_azimuth_angle=0.0, sun_altitude_angle=-90.0,
+        fog_density=0.0, fog_distance=0.0, wetness=0.0)
+    rain_midnight: carla.WeatherParameters = carla.WeatherParameters(
+        cloudiness=100.0, precipitation=100.0,
+        precipitation_deposits=100.0, wind_intensity=10.0,
+        sun_azimuth_angle=0.0, sun_altitude_angle=-90.0,
+        fog_density=0.0, fog_distance=0.0, wetness=100.0)
+    foggy_sunset: carla.WeatherParameters = carla.WeatherParameters(
+        cloudiness=0.0, precipitation=100.0,
+        precipitation_deposits=75.0, wind_intensity=75.0,
+        sun_azimuth_angle=270.0, sun_altitude_angle=15.0,
+        fog_density=100.0, fog_distance=0.0, wetness=75.0)
+    preset_values.append((clear_midnight, "CustomClearMidnight"))
+    preset_values.append((rain_midnight, "CustomRainMidnight"))
+    preset_values.append((foggy_sunset, "CustomFoggySunset"))
+    return preset_values
 
 
 def get_actor_display_name(actor, truncate=250):
@@ -199,7 +218,7 @@ def get_actor_display_name(actor, truncate=250):
 
 class World(object):
     def __init__(self, client: carla.Client, carla_world: carla.World, hud: 'HUD', environment: Environment,
-                 history: 'History', actor_filter, settings, hq_recording=False):
+                 history: 'History', actor_filter, settings: ConfigParser, hq_recording=False):
         self.client = client
         self.world = carla_world
         self.map = self.world.get_map()
@@ -229,7 +248,7 @@ class World(object):
         self._eval_num_current = None
         self._eval_cars = None
         self._eval_cars_idx = None
-        self._eval_routes = None
+        self._eval_routes: Optional[List[List[Tuple[int, int]]]] = None
         self._eval_routes_idx = None  # Current evaluating route
         self._eval_route_idx = None  # Current route waypoint
         self._eval_weathers = None
@@ -249,7 +268,7 @@ class World(object):
         self._num_walkers_min = None
         self._num_walkers_max = None
         self._spawning_radius = None
-        self._vehicle_spawner = VehicleSpawner(self.client, self.world)
+        self._vehicle_spawner = VehicleSpawner(self.client, self.world,safe_mode=False)
 
         # Other settings 
         self._environment = environment
@@ -282,9 +301,10 @@ class World(object):
         self._eval_mode = True if settings.get("Eval", "EvalMode", fallback="No").strip().lower() == "yes" else False
         self._eval_num = int(settings.get("Eval", "EvalNum", fallback=1))
         self._eval_num_current = 1
-        eval_cars = settings.get("Eval", "EvalCars", fallback=None)
-        eval_routes = settings.get("Eval", "EvalRoutes", fallback=None)
-        eval_weathers = settings.get("Eval", "EvalWeathers", fallback=None)
+        eval_cars: str = settings.get("Eval", "EvalCars", fallback=None)
+        eval_pedestrians: int = int(settings.get("Eval", "EvalPedestrians", fallback=None))
+        eval_routes: str = settings.get("Eval", "EvalRoutes", fallback=None)
+        eval_weathers: str = settings.get("Eval", "EvalWeathers", fallback=None)
 
         # Read vehicle settings 
         self._num_vehicles_min = int(settings.get("Spawning", "NumberOfVehiclesMin", fallback=0))
@@ -312,19 +332,20 @@ class World(object):
             self._eval_routes_idx = 0
             self._eval_route_idx = 0
             self._eval_routes = []
-            eval_routes = eval_routes.split()
-            for eval_route in eval_routes:
+            eval_route_list = eval_routes.split()
+            for eval_route in eval_route_list:
                 eval_route = [ast.literal_eval(e) for e in eval_route.split()][0]
                 self._eval_routes.append(eval_route)
         if eval_cars:
-            eval_cars = eval_cars.split()
-            eval_cars = [ast.literal_eval(c) for c in eval_cars][0]
-            self._eval_cars = eval_cars
+            eval_car_list = eval_cars.split()
+            eval_car_list = [ast.literal_eval(c) for c in eval_car_list][0]
+            self._eval_cars = eval_car_list
             self._eval_cars_idx = 0
+        self.eval_pedestrians = eval_pedestrians if eval_pedestrians is not None else 0
         if eval_weathers:
-            eval_weathers = eval_weathers.split()
-            eval_weathers = [ast.literal_eval(w) for w in eval_weathers][0]
-            self._eval_weathers = eval_weathers
+            eval_weather_list = eval_weathers.split()
+            eval_weather_list = [ast.literal_eval(w) for w in eval_weather_list][0]
+            self._eval_weathers = eval_weather_list
             self._eval_weathers_idx = 0
 
     def restart(self):
@@ -358,8 +379,8 @@ class World(object):
                     self._spawn_point_start,
                     self._eval_cars[self._eval_cars_idx],
                     self._eval_cars[self._eval_cars_idx],
-                    0,
-                    0,
+                    self.eval_pedestrians,
+                    self.eval_pedestrians,
                     self._spawning_radius)
 
                 # Choose starting spawnpoint in recording routes
@@ -1042,6 +1063,9 @@ class KeyboardControl(object):
         self._control.steer = float(steer)
 
         if target_speed is not None:
+            # Sanity
+            target_speed = min(player.get_speed_limit(), target_speed)
+
             if self._target_speed_pid is None or self._target_speed_pid._vehicle != player:
                 self._target_speed_pid = PIDLongitudinalController(player, 0.1, 0.0, 2, FIXED_DELTA_SECONDS)
             pid_output = self._target_speed_pid.run_step(target_speed, debug=False)
@@ -1340,7 +1364,7 @@ class HelpText(object):
 class CameraManager(object):
     def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', worldObject: World,
                  eval=False,
-                 hq_recording=False, route_number=0):
+                 hq_recording=True, route_number=0):
         self.world = worldObject
         self.sensor = None
         self._surface = None
@@ -1435,8 +1459,9 @@ class CameraManager(object):
             # self.world.restart()
 
     def _initiate_recording(self):
-        z_offset, pitch_offset, fov = 0, 0, 90 if self.eval or not self.change_cameras else self._transform_variations_list[
-            self._camera_transform_index]
+        z_offset, pitch_offset, fov = 0, 0, 90 if self.eval or not self.change_cameras else \
+            self._transform_variations_list[
+                self._camera_transform_index]
 
         sensor_bp = self._parent.get_world().get_blueprint_library().find('sensor.camera.rgb')
         # sensor_bp.set_attribute('image_size_x', "350")
@@ -1498,10 +1523,17 @@ class CameraManager(object):
             sensor_bp.set_attribute('image_size_y', "1080")
             sensor_bp.set_attribute('fov', str(fov))
 
+            # Demo video HQ transform
             sensor = self._parent.get_world().spawn_actor(
                 sensor_bp,
-                carla.Transform(carla.Location(x=CAMERA_X, z=2.0 + z_offset)),
+                carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
                 attach_to=self._parent)
+
+            # Original HQ transform
+            # sensor = self._parent.get_world().spawn_actor(
+            #     sensor_bp,
+            #     carla.Transform(carla.Location(x=CAMERA_X, z=2.0 + z_offset)),
+            #     attach_to=self._parent)
             sensor.listen(lambda image: self._history.update_image_hq(
                 image, "hq_record", "rgb"))
             self._recording_sensors.append(sensor)
@@ -1946,12 +1978,12 @@ class Evaluator():
                                                        )
         # Write eventlog to csv
         model_name = '_'.join(self.hud._drive_model_name.split('/'))
-        dir_path = Path("EvalResults_paper") / self.current_eval_timestamp / model_name / "EventLogs"
+        dir_path = Path(EVAL_RESULTS_PATH) / self.current_eval_timestamp / model_name / "EventLogs"
         csv_path = dir_path / (self.current_episode_timestamp + ".csv")
         dir_path.mkdir(parents=True, exist_ok=True)
         self.event_logs[-1].to_csv(csv_path)
 
-        model_summary_path = Path("EvalResults_paper") / self.current_eval_timestamp / model_name / "summary.csv"
+        model_summary_path = Path(EVAL_RESULTS_PATH) / self.current_eval_timestamp / model_name / "summary.csv"
         self.model_summary.to_csv(str(model_summary_path))
 
     def initialize_sensors(self, parent_actor):
@@ -2136,7 +2168,7 @@ def game_loop(args):
                 history,
                 args.filter,
                 settings,
-                hq_recording=False)
+                hq_recording=True)
 
             models = None
 

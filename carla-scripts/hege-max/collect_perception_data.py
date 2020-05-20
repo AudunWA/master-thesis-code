@@ -17,10 +17,10 @@ import carla
 from vehicle_spawner import VehicleSpawner
 
 # We want to get a deterministic output
-random.seed(1)
+# random.seed(1)
 
 FPS = 10
-NUMBER_OF_IMAGES_PER_VEHICLE_PER_WORLD = 50
+NUMBER_OF_IMAGES_PER_VEHICLE_PER_WORLD = 100
 TIMEOUT = 2
 SENSOR_TICK = 5.0  # Seconds between each sensor tick
 
@@ -140,10 +140,8 @@ class Weather(object):
 
 
 def main():
-    has_set = False
-    # worlds = ["Town01"]
-    # worlds = ["Town01", "Town02", "Town03", "Town04"]
-    worlds = ["Town04"]
+    worlds = ["Town02"]
+    # worlds = ["Town01", "Town02", "Town03", "Town04", "Town05"]
     client = carla.Client("127.0.0.1", 2000)
     client.set_timeout(10.0)
     traffic_manager: carla.TrafficManager = client.get_trafficmanager()
@@ -165,7 +163,7 @@ def main():
         world.set_weather(weather.weather)
 
         vehicle_spawner = VehicleSpawner(client, world, False)
-        vehicle_spawner.spawn_nearby(0, 40, 70, 25, 80, 1000)
+        vehicle_spawner.spawn_nearby(0, 40, 40, 40, 80, 1000000)
 
         print("Running the world for 5 seconds before capturing...")
         frame = start_frame
@@ -202,7 +200,7 @@ def main():
                 for sensor_name, (queue, sensor) in vehicle_sensors.items():
                     try:
                         image = retrieve_data(frame, queue, TIMEOUT)
-                        print(f"Got image from {sensor_name}")
+                        print(f"Got image from {sensor_name} {image.frame}")
                         frame_nums.append(image.frame)
                         image.save_to_disk(f"output_perception/{world_name}/{sensor_name}/{vehicle_id}_{image.frame}.png",
                                            get_color_converter(sensor_name))

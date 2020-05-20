@@ -14,16 +14,20 @@ from distutils.util import strtobool
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.engine.saving import load_model
 from keras.layers import Input, Flatten, Dense, concatenate, TimeDistributed, CuDNNLSTM, \
-    Lambda, BatchNormalization, Activation
+    Lambda, BatchNormalization, Activation, Conv2D, ZeroPadding2D, MaxPooling2D
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.utils import Sequence, plot_model
 from keras_segmentation.data_utils.data_loader import get_image_array
 from keras_segmentation.models._pspnet_2 import Interp
+from keras_segmentation.models.mobilenet import relu6
 from keras_segmentation.predict import model_from_checkpoint_path
 from keras_segmentation.pretrained import pspnet_101_cityscapes
 from pathlib import Path
 from typing import Tuple, List
+
+from prediction_pipeline.unet_depth_segm import unet_model_from_checkpoint_path
+from prediction_pipeline.utils.hegemax_augment import change_light, change_hue, add_rain, add_shadow, gaussian_blur
 
 three_class_checkpoints_path = "data/segmentation_models/pspnet_3_classes/pspnet_3_classes"
 seven_class_checkpoints_path = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
@@ -31,8 +35,14 @@ seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/p
 seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
 seven_class_vanilla_psp_depth_path = "data/segmentation_models/pspnet_8_classes/2020-02-26_12-00-11/pspnet_8_classes"
 resnet50_pspnet_8_classes = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
-
 resnet50_pspnet_3_classes = "/hdd/audun/master-thesis-code/training/model_checkpoints/pspnet_checkpoints_best/pspnet_50_three"
+mobilenet_unet_5_classes_augmentFalse = "data/segmentation_models/mobilenet_unet_5_classes_augmentFalse/2020-04-18_02-52-11/mobilenet_unet_5_classes_augmentFalse"
+mobilenet_unet_5_classes_augment_true_combined_data_false = "data/segmentation_models/mobilenet_unet_5_classes_augment_true_combined_data_false/2020-04-20_18-56-35/mobilenet_unet_5_classes_augment_true_combined_data_false"
+mobilenet_unet_5_classes_augment_true_combined_data_true = "data/segmentation_models/mobilenet_unet_5_classes_augment_true_combined_data_true/2020-04-21_14-00-05/mobilenet_unet_5_classes_augment_true_combined_data_true"
+mobilenet_unet_5_classes_augment_true_data_carla = "data/segmentation_models/mobilenet_unet_5_classes_augment_true_data_carla/2020-04-23_15-08-04/mobilenet_unet_5_classes_augment_true_data_carla"
+mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm = "data/segmentation_models/mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm/2020-04-27_16-27-21/mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm"
+mobilenet_unet_depth_segm_5_classes_carla_only_depth_segm_depth_w05 = "data/segmentation_models/mobilenet_unet_depth_segm_5_classes_carla_only_depth_segm_depth_w0.5/2020-05-01_15-06-39/mobilenet_unet_depth_segm_5_classes_carla_only_depth_segm_depth_w0.5"
+mapillary_carla_segm_depth = "data/segmentation_models/mobilenet_unet_depth_segm_5_classes_carla_mapillary_depth_segm/2020-04-28_10-12-38/mobilenet_unet_depth_segm_5_classes_carla_mapillary_depth_segm"
 
 import tensorflow as tf
 import keras.backend as K
@@ -117,6 +127,7 @@ def create_input_dict():
         "forward_imgs": [],
         "info_signals": [],
         "hlcs": [],
+        "last_steers": [],
     }
 
 
@@ -140,6 +151,8 @@ def split_dict(dictionary, split_pos):
 
 
 def adjust_hlcs(hlcs, info_signals):
+    # Ensure same results for same input
+    random.seed(123)
     """
     Randomly adjust HLC backwards,
     such that the HLC data is given before the car is in the intersection
@@ -370,6 +383,8 @@ def plot_data(dist, title=""):
     """ Plots distribution of HLC, speed and traffic lights """
     print("Plotting...")
     tot_num = 0
+    for key in dist["hlc"]:
+        tot_num += dist["hlc"][key]
 
     fig = plt.figure(figsize=(16, 6))
 
@@ -629,6 +644,8 @@ def prepare_dataset_lstm(inputs, targets, sampling_interval, seq_length):
          get_episode_sequences(inputs["hlcs"][e], sampling_interval, seq_length)]
         [inputs_flat["info_signals"].append(sequence) for sequence in
          get_episode_sequences(inputs["info_signals"][e], sampling_interval, seq_length)]
+        [inputs_flat["last_steers"].append(sequence) for sequence in
+         get_episode_sequences([0.0] + targets["steer"][e][:-1], sampling_interval, seq_length)]
         [targets_flat["steer"].append(sequence[-1]) for sequence in
          get_episode_sequences(targets["steer"][e], sampling_interval, seq_length)]
         [targets_flat["target_speed"].append(sequence[-1]) for sequence in
@@ -689,6 +706,57 @@ def get_segmentation_model(model_type, freeze=True):
         segmentation_model = model_from_checkpoint_path(resnet50_pspnet_3_classes)
         output_layer = segmentation_model.get_layer(name="conv6")
         x = output_layer.output
+    elif model_type == "mobilenet_unet_5_classes_augmentFalse":
+        segmentation_model = model_from_checkpoint_path(mobilenet_unet_5_classes_augmentFalse)
+        # output_layer = segmentation_model.get_layer(name="activation_1")
+        output_layer = segmentation_model.get_layer(name="conv2d_5")
+        x = output_layer.output
+    elif model_type == "mobilenet_unet_5_classes_augment_true_combined_data_true":
+        segmentation_model = model_from_checkpoint_path(mobilenet_unet_5_classes_augment_true_combined_data_true)
+        # output_layer = segmentation_model.get_layer(name="activation_1")
+        output_layer = segmentation_model.get_layer(name="conv2d_5")
+        x = output_layer.output
+    elif model_type == "mobilenet_unet_5_classes_augment_true_data_carla":
+        segmentation_model = model_from_checkpoint_path(mobilenet_unet_5_classes_augment_true_data_carla)
+        # output_layer = segmentation_model.get_layer(name="activation_1")
+        output_layer = segmentation_model.get_layer(name="conv2d_5")
+        x = output_layer.output
+    elif model_type == "mobilenet_unet_5_classes_augment_true_combined_data_false":
+        segmentation_model = model_from_checkpoint_path(mobilenet_unet_5_classes_augment_true_combined_data_false)
+        # output_layer = segmentation_model.get_layer(name="activation_1")
+        output_layer = segmentation_model.get_layer(name="conv2d_5")
+        x = output_layer.output
+    elif model_type == "mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm":
+        segmentation_model = unet_model_from_checkpoint_path(mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm)
+
+        # Concat segmentation and depth output
+        segm_output_layer = segmentation_model.get_layer(name="conv2d_5").output
+        depth_output_layer = segmentation_model.get_layer(name="conv2d_10").output
+        x = concatenate([segm_output_layer, depth_output_layer], axis=3)
+    elif model_type == "mobilenet_unet_depth_segm_5_classes_carla_only_depth_segm_depth_w05":
+        segmentation_model = unet_model_from_checkpoint_path(
+            mobilenet_unet_depth_segm_5_classes_carla_only_depth_segm_depth_w05)
+
+        # Concat segmentation and depth output
+        segm_output_layer = segmentation_model.get_layer(name="conv2d_5").output
+        depth_output_layer = segmentation_model.get_layer(name="conv2d_10").output
+        x = concatenate([segm_output_layer, depth_output_layer], axis=3)
+    elif model_type == "mapillary_carla_segm_depth":
+        segmentation_model = unet_model_from_checkpoint_path(
+            mapillary_carla_segm_depth)
+
+        # Concat segmentation and depth output
+        segm_output_layer = segmentation_model.get_layer(name="conv2d_5").output
+        depth_output_layer = segmentation_model.get_layer(name="conv2d_10").output
+        x = concatenate([segm_output_layer, depth_output_layer], axis=3)
+    elif model_type == "mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm_common_cut":
+        segmentation_model = unet_model_from_checkpoint_path(mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm)
+        output_layer = segmentation_model.get_layer(name="conv_pw_11_relu")
+        x = output_layer.output
+    elif model_type == "mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm_only_segm":
+        segmentation_model = unet_model_from_checkpoint_path(mobilenet_unet_depth_segm_5_classes_mapillary_depth_segm)
+        output_layer = segmentation_model.get_layer(name="conv2d_5")
+        x = output_layer.output
 
     plot_model(segmentation_model, "segmentation_model.png", show_shapes=True)
     # Explicitly define new model input and output by slicing out old model layers
@@ -702,37 +770,119 @@ def get_segmentation_model(model_type, freeze=True):
     return model_new
 
 
+def hegemax_cnn(image_input, info_input, hlc_input):
+    # x = TimeDistributed(Cropping2D(cropping=((50, 0), (0, 0))))(image_input)
+    # x = TimeDistributed(Lambda(lambda x: ((x / 255.0) - 0.5)))(x)
+    x = TimeDistributed(Conv2D(24, (5, 5), strides=(2, 2), activation="relu"))(image_input)
+    x = TimeDistributed(Conv2D(36, (5, 5), strides=(2, 2), activation="relu"))(x)
+    x = TimeDistributed(Conv2D(48, (5, 5), strides=(2, 2), activation="relu"))(x)
+    x = TimeDistributed(Conv2D(64, (3, 3), strides=(2, 2), activation="relu"))(x)
+    x = TimeDistributed(Conv2D(64, (3, 3), activation="relu"))(x)
+    x = TimeDistributed(Conv2D(64, (3, 3), activation="relu"))(x)
+
+    conv_output = TimeDistributed(Flatten())(x)
+    x = concatenate([conv_output, info_input, hlc_input])
+    x = TimeDistributed(Dense(100, activation="relu"))(x)
+    x = CuDNNLSTM(10, return_sequences=False)(x)
+    return x
+
+
 def get_lstm_model(seq_length, freeze_segmentation, sine_steering=False, segm_model="seven_class_trained",
                    print_summary=True):
     hlc_input = Input(shape=(seq_length, 4), name="hlc_input")
+    prev_steer_input = Input(shape=(seq_length, 1), name="prev_steer_input")
     info_input = Input(shape=(seq_length, 3), name="info_input")
 
     segmentation_model = get_segmentation_model(segm_model, freeze_segmentation)
     [_, height, width, _] = segmentation_model.input.shape.dims
     forward_image_input = Input(shape=(seq_length, height.value, width.value, 3), name="forward_image_input")
     segmentation_output = TimeDistributed(segmentation_model)(forward_image_input)
-    segmentation_output = TimeDistributed(Flatten())(segmentation_output)
 
-    # segmentation_output = Dropout(0.1)(segmentation_output)
-    segmentation_output = BatchNormalization()(segmentation_output)
-    segmentation_output = Activation(activation="relu")(segmentation_output)
+    hegemax = False
+    steer_pred = None
+    target_speed_pred = None
+    if hegemax:
+        x = hegemax_cnn(segmentation_output, info_input, hlc_input)
+        if sine_steering:
+            steer_pred = Dense(10, activation="tanh", name="steer_pred")(x)
+        else:
+            steer_pred = Dense(1, activation="relu", name="steer_pred")(x)
 
-    x = concatenate([segmentation_output, hlc_input, info_input])
-    # x = Dropout(0.2)(x)
-
-    x = TimeDistributed(Dense(100, activation="relu"))(x)
-    x = concatenate([x, hlc_input])
-    x = CuDNNLSTM(10, return_sequences=False)(x)
-    hlc_latest = Lambda(lambda x: x[:, -1, :])(hlc_input)
-    x = concatenate([x, hlc_latest])
-
-    if sine_steering:
-        steer_pred = Dense(10, activation="tanh", name="steer_pred")(x)
+        x = hegemax_cnn(segmentation_output, info_input, hlc_input)
+        target_speed_pred = Dense(1, name="target_speed_pred", activation="sigmoid")(x)
     else:
-        steer_pred = Dense(1, activation="relu", name="steer_pred")(x)
+        # Vanilla encoder
+        kernel = 3
+        filter_size = 64
+        pad = 1
+        pool_size = 2
+        x = segmentation_output
+        x = TimeDistributed(ZeroPadding2D((pad, pad)))(x)
+        x = TimeDistributed(Conv2D(filter_size, (kernel, kernel),
+                                   padding='valid'))(x)
+        x = TimeDistributed(BatchNormalization())(x)
+        x = TimeDistributed(Activation('relu'))(x)
+        x = TimeDistributed(MaxPooling2D((pool_size, pool_size)))(x)
 
-    target_speed_pred = Dense(1, name="target_speed_pred", activation="sigmoid")(x)
-    model = Model(inputs=[forward_image_input, hlc_input, info_input], outputs=[steer_pred, target_speed_pred])
+        x = TimeDistributed(ZeroPadding2D((pad, pad)))(x)
+        x = TimeDistributed(Conv2D(128, (kernel, kernel),
+                                   padding='valid'))(x)
+        x = TimeDistributed(BatchNormalization())(x)
+        x = TimeDistributed(Activation('relu'))(x)
+        x = TimeDistributed(MaxPooling2D((pool_size, pool_size)))(x)
+
+        for _ in range(3):
+            x = TimeDistributed(ZeroPadding2D((pad, pad)))(x)
+            x = TimeDistributed(Conv2D(256, (kernel, kernel), padding='valid'))(x)
+            x = TimeDistributed(BatchNormalization())(x)
+            x = TimeDistributed(Activation('relu'))(x)
+            x = TimeDistributed(MaxPooling2D((pool_size, pool_size)))(x)
+        segmentation_output = x
+        # segmentation_output = TimeDistributed(Conv2D(32, (1, 1),
+        #                                              padding='same', use_bias=False))(segmentation_output)
+        # segmentation_output = TimeDistributed(Conv2D(64, (1, 1),
+        #                                              padding='same', use_bias=False))(segmentation_output)
+        # segmentation_output = TimeDistributed(AveragePooling2D(pool_size=3,
+        #                                                        strides=None, padding='same'))(segmentation_output)
+        # segmentation_output = TimeDistributed(BatchNormalization())(segmentation_output)
+        # segmentation_output = TimeDistributed(Activation('relu'))(segmentation_output)
+        # pspnet_resnet50_3class_rs_conv_layers
+        #     segmentation_output = TimeDistributed(AveragePooling2D(pool_size=3,
+        #                          strides=None, padding='same'))(segmentation_output)
+        #     segmentation_output = TimeDistributed(Conv2D(64, (1, 1),
+        #                padding='same', use_bias=False))(segmentation_output)
+        #     segmentation_output = TimeDistributed(BatchNormalization())(segmentation_output)
+        #     segmentation_output = TimeDistributed(Activation('relu'))(segmentation_output)
+        #
+        #     segmentation_output = TimeDistributed(AveragePooling2D(pool_size=2,
+        #                          strides=None, padding='same'))(segmentation_output)
+        #     segmentation_output = TimeDistributed(Conv2D(128, (1, 1),
+        #                padding='same', use_bias=False))(segmentation_output)
+        #     segmentation_output = TimeDistributed(BatchNormalization())(segmentation_output)
+        #     segmentation_output = TimeDistributed(Activation('relu'))(segmentation_output)
+
+        segmentation_output = TimeDistributed(Flatten())(segmentation_output)
+
+        # segmentation_output = Dropout(0.1)(segmentation_output)
+        # segmentation_output = BatchNormalization()(segmentation_output)
+        # segmentation_output = Activation(activation="relu")(segmentation_output)
+
+        x = concatenate([segmentation_output, hlc_input, info_input, prev_steer_input])
+        # x = Dropout(0.2)(x)
+
+        x = TimeDistributed(Dense(100, activation="relu"))(x)
+        x = concatenate([x, hlc_input])
+        x = CuDNNLSTM(10, return_sequences=False)(x)
+        hlc_latest = Lambda(lambda x: x[:, -1, :])(hlc_input)
+        x = concatenate([x, hlc_latest])
+
+        if sine_steering:
+            steer_pred = Dense(10, activation="tanh", name="steer_pred")(x)
+        else:
+            steer_pred = Dense(1, activation="relu", name="steer_pred")(x)
+
+        target_speed_pred = Dense(1, name="target_speed_pred", activation="sigmoid")(x)
+    model = Model(inputs=[forward_image_input, hlc_input, info_input, prev_steer_input], outputs=[steer_pred, target_speed_pred])
 
     if print_summary:
         model.summary()
@@ -745,12 +895,13 @@ def get_lstm_model(seq_length, freeze_segmentation, sine_steering=False, segm_mo
 # ## Define generator
 
 class generator(Sequence):
-    def __init__(self, inputs, targets, batch_size, validation=False, sine_steering=False):
+    def __init__(self, inputs, targets, batch_size, validation=False, sine_steering=False, augment=False):
         self.inputs = inputs
         self.targets = targets
         self.batch_size = batch_size
         self.validation = validation
         self.sine_steering = sine_steering
+        self.augment = augment
 
         random.seed()
         # Convert to np array
@@ -773,21 +924,69 @@ class generator(Sequence):
         else:
             # pass
             steer_pred = (steer_pred + 1) / 2  # Normalize in [0,1]
+        # steer_last_value = [[[0]]]
+        # steer_last_value.extend([[x]] for x in steer_pred[1:])
         if not self.validation:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, height=384, width=576, imgNorm="sub_mean", ordering='channels_last') for
+                    [get_image_array(image, height=224, width=224, imgNorm="sub_mean", ordering='channels_last') for
                      image in seq])
         else:
-            for seq in read_images:
-                forward_imgs.append(
-                    [get_image_array(image, height=384, width=576, imgNorm="sub_mean", ordering='channels_last') for
-                     image in seq])
+            if self.augment:
+                augment = random.randint(0, 3)
+                if augment == 0:
+                    augment_type = random.randint(0, 4)
 
+                    # Lightness
+                    if augment_type == 0:
+                        light_coeff = random.random() * 0.9 + 0.5
+                        for seq in read_images:
+                            forward_imgs.append(
+                                [get_image_array(change_light(image, light_coeff=light_coeff), height=224, width=224,
+                                                 imgNorm="sub_mean", ordering='channels_last') for image in seq])
+                    # Hue
+                    elif augment_type == 1:
+                        hue_coeff = random.random() * 1.4 + 0.2
+                        for seq in read_images:
+                            forward_imgs.append([get_image_array(change_hue(image, hue_coeff=hue_coeff), height=224,
+                                                                 width=224, imgNorm="sub_mean",
+                                                                 ordering='channels_last') for image in seq])
+                    # Rain
+                    elif augment_type == 2:
+                        for seq in read_images:
+                            forward_imgs.append([get_image_array(add_rain(image), height=224, width=224,
+                                                                 imgNorm="sub_mean", ordering='channels_last') for image
+                                                 in seq])
+
+                    # Shadows
+                    elif augment_type == 3:
+                        for seq in read_images:
+                            forward_imgs.append([get_image_array(add_shadow(image), height=224, width=224,
+                                                                 imgNorm="sub_mean", ordering='channels_last') for image
+                                                 in seq])
+                    # Gaussian blur
+                    elif augment_type == 4:
+                        for seq in read_images:
+                            forward_imgs.append([get_image_array(gaussian_blur(image), height=224, width=224,
+                                                                 imgNorm="sub_mean", ordering='channels_last') for image
+                                                 in seq])
+                else:
+                    for seq in read_images:
+                        forward_imgs.append(
+                            [get_image_array(image, height=224, width=224, imgNorm="sub_mean", ordering='channels_last')
+                             for
+                             image in seq])
+            else:
+                for seq in read_images:
+                    forward_imgs.append(
+                        [get_image_array(image, height=224, width=224, imgNorm="sub_mean", ordering='channels_last') for
+                         image in seq])
         return {
                    "forward_image_input": np.array(forward_imgs),
                    "hlc_input": self.inputs["hlcs"][subset],
                    "info_input": self.inputs["info_signals"][subset],
+                   "prev_steer_input": np.array([[x] for x in self.inputs["last_steers"][subset]])
+                   # "prev_steer_input": np.array([[(x + 1) / 2 + random.random() * 0.1] for x in self.inputs["last_steers"][subset]])
                }, {
                    "steer_pred": steer_pred,
                    "target_speed_pred": self.targets["target_speed"][subset],
@@ -821,7 +1020,8 @@ def build_or_load_model(
         return load_model(model_path, compile=True,
                           custom_objects={"custom": root_mean_squared_error,
                                           "root_mean_squared_error": root_mean_squared_error,
-                                          "Interp": Interp}), model_folder, config, initial_epoch
+                                          "Interp": Interp,
+                                          "relu6": relu6}), model_folder, config, initial_epoch
     else:
         # Prepare for logging
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
@@ -876,20 +1076,33 @@ dataset_folders_lists = \
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear",
         # "/home/audun/fast_training_data/easy_traffic_lights_rain"]
         # "/home/audun/fast_training_data/hegemax_like"
-        # ],co
+        # ],
         # ["/home/audun/fast_training_data/easy_traffic_lights_rain",
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear"],
+        # ["/home/audun/fast_training_data/town01_easy_traffic_lights_clear_099",
+        # "/home/audun/fast_training_data/town01_easy_traffic_lights_rain_099",
+        # "/home/audun/fast_training_data/easy_traffic_lights_rain",
+        # "/home/audun/fast_training_data/easy_traffic_lights_clear",
+        #  ],
+        ["/home/audun/fast_training_data/town01_easy_traffic_lights_clear_099",
+         "/home/audun/fast_training_data/town01_easy_traffic_lights_rain_099"
+         ],
         # ["/home/audun/fast_training_data/hegemax_like"]
         # ["/home/audun/fast_training_data/easy_traffic_lights_rain",
         #  "/home/audun/fast_training_data/easy_traffic_lights_clear",
         #  "/home/audun/fast_training_data/hegemax_like"]
-        ["/home/audun/fast_training_data/town01_easy_traffic_lights_clear_099",
-         "/home/audun/fast_training_data/town01_easy_traffic_lights_rain_099",
-         "/home/audun/fast_training_data/easy_traffic_lights_rain",
-         "/home/audun/fast_training_data/easy_traffic_lights_clear",
-         "/home/audun/fast_training_data/hegemax_like",
-         "/home/audun/fast_training_data/town01_hegemax_like_099"
-         ]
+        # ["/home/audun/fast_training_data/town01_easy_traffic_lights_clear_099",
+        #  "/home/audun/fast_training_data/town01_easy_traffic_lights_rain_099",
+        #  "/home/audun/fast_training_data/easy_traffic_lights_rain",
+        #  "/home/audun/fast_training_data/easy_traffic_lights_clear",
+        #  "/home/audun/fast_training_data/hegemax_like",
+        #  "/home/audun/fast_training_data/town01_hegemax_like_099"
+        #  ]
+        # ["/home/audun/fast_training_data/town01_all_actors_099",
+        #  "/home/audun/fast_training_data/town04_all_actors_099",
+        #  "/home/audun/fast_training_data/town01_easy_traffic_lights_clear_099",
+        #  "/home/audun/fast_training_data/town01_easy_traffic_lights_rain_099",
+        #  ]
     ]
 
 steering_corrections = [0.05]
@@ -905,8 +1118,7 @@ sine_steering_list = [False]
 balance_data_list = [True]
 
 use_side_cameras_list = [True]
-
-segmentation_model_name_list = ["resnet50_pspnet_8_classes"]
+segmentation_model_name_list = ["mobilenet_unet_depth_segm_5_classes_carla_only_depth_segm_depth_w05"]
 # segmentation_model_name_list = ["seven_class_vanilla_psp_depth", "seven_class_vanilla_psp"]
 
 freeze_segmentation_list = [True]
@@ -1058,6 +1270,7 @@ for parameters in parameter_permutations_list:
 
     # Define early stopping params
     es = EarlyStopping(monitor='val_steer_pred_loss', mode='min', verbose=1, patience=8)
+    # es = EarlyStopping(monitor='val_steer_pred_loss', mode='min', verbose=1, patience=16)
 
     # Train model
     history_object = model.fit_generator(
@@ -1072,7 +1285,8 @@ for parameters in parameter_permutations_list:
         use_multiprocessing=True,
         max_queue_size=12,
         workers=6,
-        initial_epoch=initial_epoch
+        initial_epoch=initial_epoch,
+        shuffle=True,
     )
 
     # Prepare plot and save it to disk

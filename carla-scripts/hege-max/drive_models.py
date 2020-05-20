@@ -77,6 +77,7 @@ class LSTMKeras(ModelInterface):
         self._img_right_history = []
         self._info_history = []
         self._hlc_history = []
+        self._steer_history = []
         self._environment_history = []
 
         # Network parameters
@@ -108,6 +109,7 @@ class LSTMKeras(ModelInterface):
         self._img_right_history = []
         self._info_history = []
         self._hlc_history = []
+        self._steer_history = []
         self._environment_history = []
 
     def _load_model(self, path: str):
@@ -127,6 +129,7 @@ class LSTMKeras(ModelInterface):
         self._img_right_history = []
         self._info_history = []
         self._hlc_history = []
+        self._steer_history = []
         self._environment_history = []
         self.loaded_at = time.time()
         self._frame = 0
@@ -164,6 +167,7 @@ class LSTMKeras(ModelInterface):
         self._img_right_history.append(np.array(img_right))"""
         self._info_history.append(np.array(info_input))
         self._hlc_history.append(np.array(hlc_input))
+        self._steer_history.append(np.array([self._last_pred[0] if self._last_pred is not None else 0.0]))
         self._environment_history.append(np.array(environment_input))
 
         if len(self._img_center_history) > req:
@@ -172,6 +176,7 @@ class LSTMKeras(ModelInterface):
             self._img_right_history.pop(0)"""
             self._info_history.pop(0)
             self._hlc_history.pop(0)
+            self._steer_history.pop(0)
             self._environment_history.pop(0)
 
         if len(self._img_center_history) == req:
@@ -181,13 +186,15 @@ class LSTMKeras(ModelInterface):
 
             infos = np.array([self._info_history[0::self._sampling_interval + 1]])
             hlcs = np.array([self._hlc_history[0::self._sampling_interval + 1]])
+            last_steers = np.array([self._steer_history[0::self._sampling_interval + 1]])
             environments = np.array([self._environment_history[0::self._sampling_interval + 1]])
 
             prediction = self._model.predict({
                 "forward_image_input": imgs_center,
                 "info_input": infos,
                 "hlc_input": hlcs,
-                "environment_input": environments
+                "environment_input": environments,
+                "prev_steer_input": last_steers
             })
 
             steer = prediction[0][0]
