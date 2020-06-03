@@ -268,7 +268,7 @@ class World(object):
         self._num_walkers_min = None
         self._num_walkers_max = None
         self._spawning_radius = None
-        self._vehicle_spawner = VehicleSpawner(self.client, self.world,safe_mode=False)
+        self._vehicle_spawner = VehicleSpawner(self.client, self.world, safe_mode=False)
 
         # Other settings 
         self._environment = environment
@@ -1364,7 +1364,7 @@ class HelpText(object):
 class CameraManager(object):
     def __init__(self, parent_actor: carla.Actor, client_ap: Agent, hud: HUD, history: 'History', worldObject: World,
                  eval=False,
-                 hq_recording=True, route_number=0):
+                 hq_recording=False, route_number=0):
         self.world = worldObject
         self.sensor = None
         self._surface = None
@@ -1377,14 +1377,19 @@ class CameraManager(object):
         self._frame_number = 1
         self._hq_recording = hq_recording
         self.did_collide = False
-        self.change_cameras = False
+        self.change_cameras = True
 
         # We want to collect training data with varying camera settings
-        # First Z is 21 above ground, about the same as SPURV
-        # z_offsets = [-2.09, -1.5, -0.5, 0]
+
+        # These were used for town01_easy_traffic_lights_multi_angle_099 and town07_easy_traffic_lights_multi_angle_099 datasets
         z_offsets = [-1.5, -0.5, 0, 0.5]
         pitch_offsets = [0, 5, 10]
         fov_variations = [65, 90, 110]
+
+        # These were used for town01_low_angles_099 and town07_low_angles_099 datasets
+        # z_offsets = [-2, -1.75, -1.25, -1, 0]
+        # pitch_offsets = [0, 2.5, 5]
+        # fov_variations = [65, 90, 110]
         self._transform_variations_list = [p for p in itertools.product(z_offsets, pitch_offsets, fov_variations)]
         RANDOM_SEED = 401241
         import random
@@ -1397,10 +1402,11 @@ class CameraManager(object):
         self._camera_transforms = [
             carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
             carla.Transform(carla.Location(x=0.5, z=2.3), carla.Rotation(pitch=-5)),
-            carla.Transform(carla.Location(x=2.4, z=2.3), carla.Rotation(pitch=-5)),
             carla.Transform(carla.Location(x=2.4, z=2.8), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=2.4, z=2.3), carla.Rotation(pitch=-5)),
             carla.Transform(carla.Location(x=2.4, z=1.8), carla.Rotation(pitch=-5)),
             carla.Transform(carla.Location(x=2.4, z=0.8), carla.Rotation(pitch=-5)),
+            carla.Transform(carla.Location(x=2.4, z=0.3), carla.Rotation(pitch=0)),
         ]
         self._transform_index = 1
         self.eval = eval
@@ -1431,6 +1437,7 @@ class CameraManager(object):
             if item[0].startswith('sensor.camera'):
                 bp.set_attribute('image_size_x', str(hud.dim[0]))
                 bp.set_attribute('image_size_y', str(hud.dim[1]))
+                bp.set_attribute('fov', str(80))
             elif item[0].startswith('sensor.lidar'):
                 bp.set_attribute('range', '5000')
             item.append(bp)
@@ -1459,13 +1466,12 @@ class CameraManager(object):
             # self.world.restart()
 
     def _initiate_recording(self):
-        z_offset, pitch_offset, fov = 0, 0, 90 if self.eval or not self.change_cameras else \
+        eval_camera_transformation = (-2, 5, 80)
+        z_offset, pitch_offset, fov = eval_camera_transformation if self.eval or not self.change_cameras else \
             self._transform_variations_list[
                 self._camera_transform_index]
 
         sensor_bp = self._parent.get_world().get_blueprint_library().find('sensor.camera.rgb')
-        # sensor_bp.set_attribute('image_size_x', "350")
-        # sensor_bp.set_attribute('image_size_y', "160")
         sensor_bp.set_attribute('image_size_x', "490")
         sensor_bp.set_attribute('image_size_y', "224")
         sensor_bp.set_attribute('fov', str(fov))
@@ -2168,7 +2174,7 @@ def game_loop(args):
                 history,
                 args.filter,
                 settings,
-                hq_recording=True)
+                hq_recording=False)
 
             models = None
 
