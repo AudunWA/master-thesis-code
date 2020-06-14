@@ -55,7 +55,7 @@ human_colors = np.array([human, bicyclist, motorcyclist, other_rider])
 traffic_light = np.array([250, 170, 30], dtype='uint8')
 
 traffic_light_colors = np.array([traffic_light])
-
+road_colors = np.concatenate((drivable_road_colors, non_drivable_road_colors))
 
 # Vehicles
 bicycle = np.array([119, 11, 32], dtype='uint8')
@@ -71,14 +71,27 @@ wheeled_slow = np.array([0, 0, 192], dtype='uint8')
 
 vehicle_colors = np.array([bicycle, bus, car, caravan, motorcycle, on_rails, other_vehicle, trailer, truck, wheeled_slow])
 
-eight_classes = np.array([drivable_road_colors, non_drivable_road_colors, crosswalk_colors, lane_marking_colors, human_colors, traffic_light_colors, vehicle_colors])
 
-three_classes = np.array([drivable_road_colors, lane_marking_colors])
+
+five_classes = np.array([road_colors, lane_marking_colors, human_colors, vehicle_colors])
+
+three_classes = np.array([road_colors, lane_marking_colors])
 
 data_folder = Path("data/segmentation_data")
 
+def get_carla_five_classes():
+    carla_road = np.array([128, 64, 128], dtype='uint8')
+    carla_sidewalk = np.array([244, 35, 232], dtype='uint8')
 
-def convert_segmentation_images(input_path, output_path):
+    carla_road_colors = np.array([carla_road, carla_sidewalk])
+    carla_vehicle_colors = np.array([np.array([0, 0, 142], dtype='uint8')])
+    carla_humans_colors = np.array([np.array([220, 20, 60], dtype='uint8')])
+    carla_lane_markings_colors = np.array([np.array([157, 234, 50], dtype='uint8')])
+
+    return np.array([carla_road_colors, carla_lane_markings_colors, carla_humans_colors, carla_vehicle_colors])
+
+
+def convert_segmentation_images(input_path, output_path, classes_array):
 
     filenames = os.listdir(str(data_folder / input_path))
 
@@ -97,7 +110,7 @@ def convert_segmentation_images(input_path, output_path):
         #  If pixel.color in lane marking colors: set pixel to (1,0,0)
         #  Else: set pixel to (2,0,0)
 
-        for j, class_colors in enumerate(eight_classes):
+        for j, class_colors in enumerate(classes_array):
             for color in class_colors:
                 mask = (img == color[::-1]).all(axis=2)
                 output_img[mask] = [j+1, 0, 0]
@@ -105,6 +118,35 @@ def convert_segmentation_images(input_path, output_path):
         write_path = str(Path(data_folder) / output_path / filename)
 
         cv2.imwrite(write_path, output_img)
+
+        i += 1
+        if i % 100 == 0:
+            print("Progress: ", i, " of ", len(filenames))
+
+
+def convert_carla_depth_imgs(input_path, output_path):
+
+    filenames = os.listdir(str(data_folder / input_path))
+
+    output_folder = str(data_folder / output_path)
+    verify_folder_exists(output_folder)
+
+    i = 0
+    for filename in filenames:
+
+        img = cv2.imread(str(data_folder / input_path / filename))
+
+        # Carla data is logarithmic. Reverse their algorithm: https://github.com/carla-simulator/driving-benchmarks/blob/master/version084/carla/image_converter.py
+        normalized_img = np.exp(((img / 255) - np.ones(img.shape)) * 5.70378) * 255
+
+
+        normalized_img[:, :, 0] = 255 - normalized_img[:, :, 0]
+        normalized_img[:, :, 1] = 0
+        normalized_img[:, :, 2] = 0
+
+        write_path = str(Path(data_folder) / output_path / filename)
+
+        cv2.imwrite(write_path, normalized_img)
 
         i += 1
         if i % 100 == 0:
@@ -157,26 +199,66 @@ validation_cropped_segmentations = data_folder / "output_cropped_val"
 
 
 # Prepare original images for train and validation
-crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/training/images/", data_folder / "images_prepped_train")
-crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/validation/images/", data_folder / "images_prepped_val")
+#crop_and_resize("/media/audun/Storage/mapillary-vistas-dataset_public_v1.1/training/images/", data_folder / "images_prepped_train")
+#crop_and_resize("/media/audun/Storage/mapillary-vistas-dataset_public_v1.1/validation/images/", data_folder / "images_prepped_val")
 
 # Prepare original segmentations for further processing
 
 
-crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/training/labels/", train_cropped_segmentations)
-crop_and_resize("/home/audun/Downloads/mapillary-vistas-dataset_public_v1.1/validation/labels/", validation_cropped_segmentations)
+#crop_and_resize("/media/audun/Storage/mapillary-vistas-dataset_public_v1.1/training/labels/", train_cropped_segmentations)
+#crop_and_resize("/media/audun/Storage/mapillary-vistas-dataset_public_v1.1/validation/labels/", validation_cropped_segmentations)
 
 # Generate dataset with correct number of reduced classes
 
-convert_segmentation_images("output_cropped_train", "segm_annotations_prepped_train")
-shutil.rmtree(train_cropped_segmentations)
-convert_segmentation_images("output_cropped_val", "segm_annotations_prepped_val")
+#convert_segmentation_images("output_cropped_train", "annotations_prepped_train", five_classes)
+#shutil.rmtree(train_cropped_segmentations)
+#convert_segmentation_images("output_cropped_val", "annotations_prepped_val", five_classes)
 
-train_cropped_segmentations = data_folder / "depth_annotations_prepped_train"
-validation_cropped_segmentations = data_folder / "depth_annotations_prepped_val"
 
-crop_and_resize("/home/audun/monodepth2/train_depth_np/", train_cropped_segmentations)
-crop_and_resize("/home/audun/monodepth2/val_depth_np/", validation_cropped_segmentations)
+carla_five_classes = get_carla_five_classes()
+
+
+
+#crop_and_resize(str(data_folder) + "/carla_test/Town01/depth/", str(data_folder) + "/carla_test/Town01/depth_cropped/")
+"""
+crop_and_resize("/media/audun/Storage/carla_training_data/Town01/depth/", "/media/audun/Storage/carla_training_data/Town01/depth_cropped/")
+crop_and_resize("/media/audun/Storage/carla_training_data/Town02/depth/", "/media/audun/Storage/carla_training_data/Town02/depth_cropped/")
+crop_and_resize("/media/audun/Storage/carla_training_data/Town03/depth/", "/media/audun/Storage/carla_training_data/Town03/depth_cropped/")
+crop_and_resize("/media/audun/Storage/carla_training_data/Town04/depth/", "/media/audun/Storage/carla_training_data/Town04/depth_cropped/")
+crop_and_resize("/media/audun/Storage/carla_training_data/Town05/depth/", "/media/audun/Storage/carla_training_data/Town05/depth_cropped/")
+"""
+
+
+#convert_carla_depth_imgs("carla_test/Town01/depth", "carla_test/Town01/depth_annotation/")
+convert_carla_depth_imgs("carla_test/Town02/depth", "carla_test/Town02/depth_annotation/")
+convert_carla_depth_imgs("carla_test/Town03/depth", "carla_test/Town03/depth_annotation/")
+convert_carla_depth_imgs("carla_test/Town04/depth", "carla_test/Town04/depth_annotation/")
+
+
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town01/rgb/", folder / "images_prepped_val")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town02/rgb/", folder / "images_prepped_train")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town03/rgb/", folder / "images_prepped_train")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town04/rgb/", folder / "images_prepped_train")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town05/rgb/", folder / "images_prepped_train")
+
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town01/segmentation/",  "/media/audun/Storage/carla_training_data/Town01/segmentation_cropped/")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town02/segmentation/",  "/media/audun/Storage/carla_training_data/Town02/segmentation_cropped/")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town03/segmentation/",  "/media/audun/Storage/carla_training_data/Town03/segmentation_cropped/")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town04/segmentation/", "/media/audun/Storage/carla_training_data/Town04/segmentation_cropped/")
+#crop_and_resize("/media/audun/Storage/carla_training_data/Town05/segmentation/",  "/media/audun/Storage/carla_training_data/Town05/segmentation_cropped/")
+
+#convert_segmentation_images("/media/audun/Storage/carla_training_data/Town01/segmentation_cropped/", "carla_only/annotations_prepped_val", carla_five_classes)
+#convert_segmentation_images("/media/audun/Storage/carla_training_data/Town02/segmentation_cropped/", "carla_only/annotations_prepped_train", carla_five_classes)
+#convert_segmentation_images("/media/audun/Storage/carla_training_data/Town03/segmentation_cropped/", "carla_only/annotations_prepped_train", carla_five_classes)
+#convert_segmentation_images("/media/audun/Storage/carla_training_data/Town04/segmentation_cropped/", "carla_only/annotations_prepped_train", carla_five_classes)
+#convert_segmentation_images("/media/audun/Storage/carla_training_data/Town05/segmentation_cropped/", "carla_only/annotations_prepped_train", carla_five_classes)
+
+
+# train_cropped_segmentations = data_folder / "depth_annotations_prepped_train"
+# validation_cropped_segmentations = data_folder / "depth_annotations_prepped_val"
+#
+# crop_and_resize("/home/audun/monodepth2/train_depth_np/", train_cropped_segmentations)
+# crop_and_resize("/home/audun/monodepth2/val_depth_np/", validation_cropped_segmentations)
 
 
 
@@ -192,7 +274,7 @@ crop_and_resize("/home/audun/monodepth2/val_depth_np/", validation_cropped_segme
 
 #crop_and_resize(str(data_folder / "cityscapes_labels") + "/", train_cropped_segmentations)
 
-convert_cityscape_segm_images("output_cropped_train", "cityspaces_segm_annotations_prepped_train")
+#convert_cityscape_segm_images("output_cropped_train", "cityspaces_segm_annotations_prepped_train")
 
 #crop_and_resize("/media/audun/Storage/trainextra_depth/", data_folder / "cityscapes_depth_annotations_prepped_train")
 #crop_and_resize("/media/audun/Storage/train_depth/", data_folder / "cityscapes_depth_annotations_prepped_train")

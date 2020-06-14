@@ -31,7 +31,7 @@ from prediction_pipeline.utils.hegemax_augment import change_light, change_hue, 
 
 three_class_checkpoints_path = "data/segmentation_models/pspnet_3_classes/pspnet_3_classes"
 seven_class_checkpoints_path = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
-seven_class_mobile_checkpoints_path = "/home/audun/master-thesis-code/training/psp_checkpoints_best/mobilenet_eight"
+seven_class_mobile_checkpoints_path = "data/segmentation_models/mobilenet_eight/mobilenet_eight"
 seven_class_vanilla_psp_path = "data/segmentation_models/pspnet_8_classes/2020-02-14_14-09-24/pspnet_8_classes"
 seven_class_vanilla_psp_depth_path = "data/segmentation_models/pspnet_8_classes/2020-02-26_12-00-11/pspnet_8_classes"
 resnet50_pspnet_8_classes = "data/segmentation_models/resnet50_pspnet_8_classes/2020-02-26_17-05-57/resnet50_pspnet_8_classes"
@@ -602,13 +602,11 @@ def balance_data_lstm(inputs, targets, straight_angle_frac=0.2):
     targets_bal = targets
     dist_bal = dist
 
-    """
     # Balance steering angle
-    print("   - Balancing steering angle")
-    inputs_bal, targets_bal = balance_steering_angle(inputs_bal, targets_bal, dist_bal, straight_angle_frac)
-    dist_bal = get_dist(inputs_bal, targets_bal)
-    print("dist_bal: ", dist_bal)
-    """
+    # print("   - Balancing steering angle")
+    # inputs_bal, targets_bal = balance_steering_angle(inputs_bal, targets_bal, dist_bal, straight_angle_frac)
+    # dist_bal = get_dist(inputs_bal, targets_bal)
+    # print("dist_bal: ", dist_bal)
 
     print("   - Balancing HLCs")
     inputs_bal, targets_bal = balance_hlc(inputs_bal, targets_bal, dist_bal)
@@ -685,7 +683,7 @@ def get_segmentation_model(model_type, freeze=True):
 
     elif model_type == "pretrained":
         segmentation_model = pspnet_101_cityscapes()
-        x = segmentation_model.get_layer("activation_107").output
+        x = segmentation_model.get_layer("conv6").output
 
     elif model_type == "seven_class_vanilla_psp":
         segmentation_model = model_from_checkpoint_path(seven_class_vanilla_psp_path)
@@ -837,13 +835,16 @@ def get_lstm_model(seq_length, freeze_segmentation, sine_steering=False, segm_mo
 # ## Define generator
 
 class generator(Sequence):
-    def __init__(self, inputs, targets, batch_size, validation=False, sine_steering=False, augment=False):
+    def __init__(self, inputs, targets, batch_size, img_width, img_height, validation=False, sine_steering=False,
+                 augment=False):
         self.inputs = inputs
         self.targets = targets
         self.batch_size = batch_size
         self.validation = validation
         self.sine_steering = sine_steering
         self.augment = augment
+        self.img_width = img_width
+        self.img_height = img_height
 
         random.seed()
         # Convert to np array
@@ -870,7 +871,8 @@ class generator(Sequence):
         if self.validation:
             for seq in read_images:
                 forward_imgs.append(
-                    [get_image_array(image, height=224, width=224, imgNorm="sub_mean", ordering='channels_last') for
+                    [get_image_array(image, width=self.img_width, height=self.img_height, imgNorm="sub_mean",
+                                     ordering='channels_last') for
                      image in seq])
         else:
             if self.augment:
@@ -883,44 +885,51 @@ class generator(Sequence):
                         light_coeff = random.random() * 0.9 + 0.5
                         for seq in read_images:
                             forward_imgs.append(
-                                [get_image_array(change_light(image, light_coeff=light_coeff), height=224, width=224,
+                                [get_image_array(change_light(image, light_coeff=light_coeff), width=self.img_width,
+                                                 height=self.img_height,
                                                  imgNorm="sub_mean", ordering='channels_last') for image in seq])
                     # Hue
                     elif augment_type == 1:
                         hue_coeff = random.random() * 1.4 + 0.2
                         for seq in read_images:
-                            forward_imgs.append([get_image_array(change_hue(image, hue_coeff=hue_coeff), height=224,
-                                                                 width=224, imgNorm="sub_mean",
+                            forward_imgs.append([get_image_array(change_hue(image, hue_coeff=hue_coeff),
+                                                                 width=self.img_width, height=self.img_height,
+                                                                 imgNorm="sub_mean",
                                                                  ordering='channels_last') for image in seq])
                     # Rain
                     elif augment_type == 2:
                         for seq in read_images:
-                            forward_imgs.append([get_image_array(add_rain(image), height=224, width=224,
-                                                                 imgNorm="sub_mean", ordering='channels_last') for image
-                                                 in seq])
+                            forward_imgs.append(
+                                [get_image_array(add_rain(image), width=self.img_width, height=self.img_height,
+                                                 imgNorm="sub_mean", ordering='channels_last') for image
+                                 in seq])
 
                     # Shadows
                     elif augment_type == 3:
                         for seq in read_images:
-                            forward_imgs.append([get_image_array(add_shadow(image), height=224, width=224,
-                                                                 imgNorm="sub_mean", ordering='channels_last') for image
-                                                 in seq])
+                            forward_imgs.append(
+                                [get_image_array(add_shadow(image), width=self.img_width, height=self.img_height,
+                                                 imgNorm="sub_mean", ordering='channels_last') for image
+                                 in seq])
                     # Gaussian blur
                     elif augment_type == 4:
                         for seq in read_images:
-                            forward_imgs.append([get_image_array(gaussian_blur(image), height=224, width=224,
-                                                                 imgNorm="sub_mean", ordering='channels_last') for image
-                                                 in seq])
+                            forward_imgs.append(
+                                [get_image_array(gaussian_blur(image), width=self.img_width, height=self.img_height,
+                                                 imgNorm="sub_mean", ordering='channels_last') for image
+                                 in seq])
                 else:
                     for seq in read_images:
                         forward_imgs.append(
-                            [get_image_array(image, height=224, width=224, imgNorm="sub_mean", ordering='channels_last')
+                            [get_image_array(image, width=self.img_width, height=self.img_height, imgNorm="sub_mean",
+                                             ordering='channels_last')
                              for
                              image in seq])
             else:
                 for seq in read_images:
                     forward_imgs.append(
-                        [get_image_array(image, height=224, width=224, imgNorm="sub_mean", ordering='channels_last') for
+                        [get_image_array(image, width=self.img_width, height=self.img_height, imgNorm="sub_mean",
+                                         ordering='channels_last') for
                          image in seq])
         return {
                    "forward_image_input": np.array(forward_imgs),
@@ -998,6 +1007,25 @@ def build_or_load_model(
         return model, path, config, 0
 
 
+def get_model_params(model):
+    """
+    Extracts some info about the model from its input and output layers
+    """
+
+    forward_image_input_layer = model.get_layer('forward_image_input')
+    steer_pred_output_layer = model.get_layer('steer_pred')
+
+    if len(forward_image_input_layer.input_shape) == 5:
+        (_, sequence_length, height, width, channels) = forward_image_input_layer.input_shape
+    else:
+        # CNN
+        (_, height, width, channels) = forward_image_input_layer.input_shape
+        sequence_length = None
+
+    sine_steering = steer_pred_output_layer.output_shape[1] > 1
+    return (height, width, channels), sequence_length, sine_steering
+
+
 # Parameters
 val_split = 0.8
 adjust_hlc_list = [True]
@@ -1018,8 +1046,8 @@ dataset_folders_lists = \
         #     "/home/audun/fast_training_data/first_eberg_day",
         # ],
         [
-           "/home/audun/fast_training_data/town01_easy_traffic_lights_multi_angle_099",
-           "/home/audun/fast_training_data/town07_easy_traffic_lights_multi_angle_099",
+            "/home/audun/fast_training_data/town01_easy_traffic_lights_multi_angle_099",
+            "/home/audun/fast_training_data/town07_easy_traffic_lights_multi_angle_099",
         ],
         # ["/home/audun/fast_training_data/town01_low_angles_099",
         #  "/home/audun/fast_training_data/town07_low_angles_099",
@@ -1035,7 +1063,6 @@ dataset_folders_lists = \
         #     "/home/audun/fast_training_data/town01_easy_traffic_lights_multi_angle_099",
         #     "/home/audun/fast_training_data/town07_easy_traffic_lights_multi_angle_099",
         #     "/home/audun/fast_training_data/first_eberg_day"],
-
     ]
 
 steering_corrections = [0.05]
@@ -1220,11 +1247,13 @@ for parameters in parameter_permutations_list:
     es = EarlyStopping(monitor='val_steer_pred_loss', mode='min', verbose=1, patience=8)
     # es = EarlyStopping(monitor='val_steer_pred_loss', mode='min', verbose=1, patience=16)
 
+    (img_height, img_width, _), _, _ = get_model_params(model)
     # Train model
     history_object = model.fit_generator(
-        generator(inputs_train, targets_train, batch_size, sine_steering=sine_steering, augment=augment),
+        generator(inputs_train, targets_train, batch_size, sine_steering=sine_steering, augment=augment,
+                  img_height=img_height, img_width=img_width),
         validation_data=generator(inputs_val, targets_val, batch_size, validation=True,
-                                  sine_steering=sine_steering),
+                                  sine_steering=sine_steering, img_height=img_height, img_width=img_width),
         epochs=epochs,
         verbose=1,
         callbacks=[checkpoint_val, es],

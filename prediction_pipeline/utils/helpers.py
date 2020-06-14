@@ -55,7 +55,7 @@ def crop_and_resize_img(img):
     side_len = min(img.shape[0], img.shape[1])
     side_len -= side_len % 32
     cropped_img = img[0:side_len, 0:side_len]
-    return cv2.resize(cropped_img, (256, 256), interpolation=cv2.INTER_NEAREST)
+    return cv2.resize(cropped_img, (384, 384), interpolation=cv2.INTER_NEAREST)
 
 def verify_folder_exists(path):
     if not os.path.exists(str(path)):
